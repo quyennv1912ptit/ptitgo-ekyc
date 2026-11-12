@@ -30,8 +30,6 @@ class Settings(BaseSettings):
     card_yolo_conf: float = Field(default=0.25, gt=0, le=1)
     card_yolo_keypoint_conf: float = Field(default=0.4, gt=0, le=1)
     card_yolo_min_area_ratio: float = Field(default=0.02, gt=0, le=1)
-    # DEPRECATED: unused since fbe1ec1. Không ràng buộc giá trị để key cũ không chặn startup.
-    card_yolo_border_ratio: float = 0.003
     card_aspect_ratio_min: float = Field(default=1.2, gt=1)
     card_aspect_ratio_max: float = Field(default=2.1, gt=1)
     # Ngưỡng khởi điểm cho phát hiện nhiều thẻ và fallback xoay; cần chỉnh bằng ảnh thật.
@@ -54,14 +52,6 @@ class Settings(BaseSettings):
     evaluation_blur_threshold: float = Field(default=20, ge=0)
     evaluation_glare_ratio_max: float = Field(default=0.15, ge=0, le=1)
     evaluation_min_image_side_px: int = Field(default=320, gt=0)
-    # DEPRECATED: unused since c889c11
-    name_match_block: float = Field(default=0.85, ge=0, le=1)
-    # DEPRECATED: unused since c889c11
-    name_match_warn: float = Field(default=0.95, ge=0, le=1)
-    # DEPRECATED: unused since c889c11
-    face_model: str = "ArcFace"
-    # DEPRECATED: unused since c889c11
-    face_detector: str = "retinaface"
 
     ocr_backend: Literal["easyocr", "none"] = "easyocr"
     ocr_languages: Annotated[list[str], NoDecode] = ["vi", "en"]
@@ -150,8 +140,6 @@ class Settings(BaseSettings):
     def validate_settings(self) -> "Settings":
         if not self.ekyc_api_key.get_secret_value().strip():
             raise ValueError("EKYC_API_KEY must not be empty")
-        if self.name_match_block > self.name_match_warn:
-            raise ValueError("NAME_MATCH_BLOCK must be <= NAME_MATCH_WARN")
         if self.card_aspect_ratio_min > self.card_aspect_ratio_max:
             raise ValueError("CARD_ASPECT_RATIO_MIN must be <= CARD_ASPECT_RATIO_MAX")
         if self.card_min_long_side_px > self.card_ok_long_side_px:
