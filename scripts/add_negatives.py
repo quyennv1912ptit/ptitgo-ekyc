@@ -1,17 +1,19 @@
 import os
 import shutil
+
 from sklearn.model_selection import train_test_split
 
 # ================= CẤU HÌNH =================
-NEGATIVE_DIR = "./Sorted_Dataset/invalid_non_doc" 
+NEGATIVE_DIR = "./Sorted_Dataset/invalid_non_doc"
 DATASET_DIR = "./card_dataset"
-NUM_NEGATIVES = 200 # Tổng số ảnh rác muốn lấy
+NUM_NEGATIVES = 200  # Tổng số ảnh rác muốn lấy
 # ============================================
 
+
 def process_negatives(img_list, split_name):
-    img_dir = os.path.join(DATASET_DIR, 'images', split_name)
-    lbl_dir = os.path.join(DATASET_DIR, 'labels', split_name)
-    
+    img_dir = os.path.join(DATASET_DIR, "images", split_name)
+    lbl_dir = os.path.join(DATASET_DIR, "labels", split_name)
+
     count = 0
     for img_name in img_list:
         base_name = os.path.splitext(img_name)[0]
@@ -23,11 +25,12 @@ def process_negatives(img_list, split_name):
         shutil.copy(src_img, dst_img)
 
         # 2. Tạo file nhãn TRỐNG
-        with open(dst_lbl, 'w', encoding='utf-8') as f:
+        with open(dst_lbl, "w", encoding="utf-8"):
             pass
-            
+
         count += 1
     print(f" Đã bơm {count} ảnh âm vào tập {split_name.upper()}")
+
 
 def main():
     if not os.path.exists(NEGATIVE_DIR):
@@ -35,8 +38,8 @@ def main():
         return
 
     # Lấy danh sách ảnh âm
-    images = [f for f in os.listdir(NEGATIVE_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    
+    images = [f for f in os.listdir(NEGATIVE_DIR) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+
     if len(images) < NUM_NEGATIVES:
         images_to_use = images
     else:
@@ -53,11 +56,12 @@ def main():
     val_imgs, test_imgs = train_test_split(temp_imgs, test_size=0.5, random_state=42)
 
     # Đưa vào các thư mục tương ứng
-    process_negatives(train_imgs, 'train')
-    process_negatives(val_imgs, 'val')
-    process_negatives(test_imgs, 'test')
+    process_negatives(train_imgs, "train")
+    process_negatives(val_imgs, "val")
+    process_negatives(test_imgs, "test")
 
     print("\nHoàn tất! Hãy nén lại thư mục 'card_dataset' và đẩy lên Kaggle để train V2.")
+
 
 if __name__ == "__main__":
     main()
