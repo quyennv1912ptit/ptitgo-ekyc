@@ -1,0 +1,64 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets, caches, model weights and personal documents
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+models/
+runs/
+*.pt
+.easyocr/
+.deepface/
+tests/fixtures/private/
+quality-metrics.csv
+*.log
+face-metrics.csv
+
+local_samples/
+card_dataset_v3/
+tests/fixtures/real/
+
+# ===== Mặc định chặn mọi thứ ở thư mục gốc, chỉ mở lại những gì cần =====
+/*
+!/.gitignore
+!/.python-version
+!/.env.example
+!/pyproject.toml
+!/uv.lock
+!/README.md
+!/Dockerfile
+!/src/
+!/scripts/
+!/tests/
+!/notebooks/
+!/docs/
+
+# ===== Trong các thư mục được mở: vẫn chặn dữ liệu và file lớn =====
+/tests/data/
+/tests/fixtures/private/
+__pycache__/
+*.pyc
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.webp
+*.pt
+*.onnx
+*.zip
+*.xlsx
+*.csv
+.env
