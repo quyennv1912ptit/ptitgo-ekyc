@@ -189,6 +189,10 @@ class CccdService:
                     )
                 )
             low_resolution = any(warning.code == WarningCode.LOW_RESOLUTION for warning in warnings)
+            if low_resolution:
+                parsed = {name for name, field in all_fields.items() if field.status == "parsed"}
+                review = set(review_fields) | parsed
+                review_fields = [name for name in REVIEW_ORDER if name in review]
             data = CccdData(
                 id_number=front.id_number.value,
                 full_name=front.full_name.value,

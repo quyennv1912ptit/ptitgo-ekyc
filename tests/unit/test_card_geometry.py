@@ -144,6 +144,14 @@ def test_low_resolution_warning_message_is_vietnamese(settings: Settings) -> Non
     )
 
 
+def test_size_block_message_mentions_closer_and_full_resolution(settings: Settings) -> None:
+    with pytest.raises(EkycError) as error:
+        DefaultCardPreparer(settings).gate(quad(599, 374, 50, 50), 1400, 900)
+    assert error.value.code == ErrorCode.IMAGE_TOO_SMALL
+    assert "lại gần" in error.value.message
+    assert "độ phân giải đầy đủ" in error.value.message
+
+
 def test_calibration_profile_never_blocks(settings: Settings, monkeypatch) -> None:
     image = np.zeros((800, 1200, 3), dtype=np.uint8)
     outside = quad(1000, 600, -20, -20)

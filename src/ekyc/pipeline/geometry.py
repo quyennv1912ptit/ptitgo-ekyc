@@ -9,6 +9,10 @@ from ekyc.core.errors import ErrorCode, WarningCode
 from ekyc.schemas.common import Warning
 
 LOW_RESOLUTION_MESSAGE = "Độ phân giải ảnh thấp, hãy kiểm tra lại các trường được trích xuất."
+IMAGE_TOO_SMALL_MESSAGE = (
+    "Ảnh quá nhỏ hoặc giấy tờ ở quá xa, hãy đưa giấy tờ lại gần máy ảnh "
+    "và chụp ở độ phân giải đầy đủ."
+)
 
 
 class GateStatus(str, Enum):  # noqa: UP042 - Giữ kiểu enum theo đặc tả.

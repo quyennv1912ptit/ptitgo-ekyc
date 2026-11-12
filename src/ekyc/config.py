@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -22,15 +23,27 @@ class Settings(BaseSettings):
     min_brightness: float = Field(default=40, ge=0, le=255)
     blur_threshold: float = Field(default=100, ge=0)
     glare_ratio_max: float = Field(default=0.04, ge=0, le=1)
-    card_detector_backend: Literal["opencv", "yolo"] = "opencv"
+    # Mặc định tự chọn yolo khi có checkpoint; opencv là backend legacy.
+    card_detector_backend: Literal["opencv", "yolo"] | None = None
     card_yolo_model_path: str = "models/card_pose_v3_best.pt"
     card_yolo_imgsz: int = Field(default=640, ge=64)
     card_yolo_conf: float = Field(default=0.25, gt=0, le=1)
     card_yolo_keypoint_conf: float = Field(default=0.4, gt=0, le=1)
     card_yolo_min_area_ratio: float = Field(default=0.02, gt=0, le=1)
-    card_yolo_border_ratio: float = Field(default=0.003, ge=0, lt=0.1)
+    # DEPRECATED: unused since fbe1ec1. Không ràng buộc giá trị để key cũ không chặn startup.
+    card_yolo_border_ratio: float = 0.003
     card_aspect_ratio_min: float = Field(default=1.2, gt=1)
     card_aspect_ratio_max: float = Field(default=2.1, gt=1)
+    # Ngưỡng khởi điểm cho phát hiện nhiều thẻ và fallback xoay; cần chỉnh bằng ảnh thật.
+    card_conf_primary: float = Field(default=0.25, gt=0, le=1)
+    card_conf_rotated: float = Field(default=0.35, gt=0, le=1)
+    card_aspect_min: float = Field(default=1.15, gt=1)
+    card_aspect_max: float = Field(default=2.3, gt=1)
+    card_dup_iou: float = Field(default=0.5, ge=0, le=1)
+    card_contain_ratio: float = Field(default=0.8, ge=0, le=1)
+    card_secondary_max_overlap: float = Field(default=0.1, ge=0, le=1)
+    card_secondary_min_conf: float = Field(default=0.5, gt=0, le=1)
+    card_secondary_min_area_ratio: float = Field(default=0.15, gt=0, le=1)
     card_output_width: int = Field(default=1600, ge=64)
     card_output_height: int = Field(default=1009, ge=64)
     # Ngưỡng khởi điểm cho gate hình học trước warp; cần chỉnh bằng ảnh thật.
@@ -41,9 +54,13 @@ class Settings(BaseSettings):
     evaluation_blur_threshold: float = Field(default=20, ge=0)
     evaluation_glare_ratio_max: float = Field(default=0.15, ge=0, le=1)
     evaluation_min_image_side_px: int = Field(default=320, gt=0)
+    # DEPRECATED: unused since c889c11
     name_match_block: float = Field(default=0.85, ge=0, le=1)
+    # DEPRECATED: unused since c889c11
     name_match_warn: float = Field(default=0.95, ge=0, le=1)
+    # DEPRECATED: unused since c889c11
     face_model: str = "ArcFace"
+    # DEPRECATED: unused since c889c11
     face_detector: str = "retinaface"
 
     ocr_backend: Literal["easyocr", "none"] = "easyocr"
@@ -139,12 +156,21 @@ class Settings(BaseSettings):
             raise ValueError("CARD_ASPECT_RATIO_MIN must be <= CARD_ASPECT_RATIO_MAX")
         if self.card_min_long_side_px > self.card_ok_long_side_px:
             raise ValueError("CARD_MIN_LONG_SIDE_PX must be <= CARD_OK_LONG_SIDE_PX")
+        if self.card_aspect_min > self.card_aspect_max:
+            raise ValueError("CARD_ASPECT_MIN must be <= CARD_ASPECT_MAX")
         if self.card_output_width <= self.card_output_height:
             raise ValueError("Card output must be landscape")
         if self.env == "prod" and self.quality_profile == "evaluation":
             raise ValueError("Evaluation quality profile must not run in prod")
         if self.env == "prod" and self.quality_profile == "calibration":
             raise ValueError("Calibration quality profile must not run in prod")
+        if self.card_detector_backend is None:
+            available = Path(self.card_yolo_model_path).is_file()
+            self.card_detector_backend = "yolo" if available else "opencv"
+        if self.card_detector_backend == "yolo" and not Path(self.card_yolo_model_path).is_file():
+            raise ValueError(
+                "CARD_DETECTOR_BACKEND=yolo nhưng thiếu checkpoint: " + self.card_yolo_model_path
+            )
         return self
 
 

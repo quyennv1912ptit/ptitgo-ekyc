@@ -163,6 +163,16 @@ def test_low_resolution_warning_marks_review(service: CccdService) -> None:
     result = service.run("front", "back", today=TODAY)
     assert any(w.code == WarningCode.LOW_RESOLUTION for w in result.warnings)
     assert result.data.review_required
+    assert result.data.review_fields == [
+        "idNumber",
+        "fullName",
+        "dob",
+        "gender",
+        "placeOfOrigin",
+        "address",
+        "expiryDate",
+        "issueDate",
+    ]
 
 
 def test_image_error_and_early_stop(service: CccdService) -> None:

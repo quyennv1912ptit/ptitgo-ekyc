@@ -113,6 +113,29 @@ def test_missing_checkpoint_does_not_fallback(settings, tmp_path):
         DefaultCardPreparer(config)
 
 
+def test_yolo_backend_requires_checkpoint(tmp_path):
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            ekyc_api_key="test",
+            card_detector_backend="yolo",
+            card_yolo_model_path=str(tmp_path / "missing.pt"),
+        )
+
+
+def test_backend_defaults_by_checkpoint_presence(tmp_path):
+    checkpoint = tmp_path / "model.pt"
+    checkpoint.write_bytes(b"placeholder")
+    with_checkpoint = Settings(
+        _env_file=None, ekyc_api_key="test", card_yolo_model_path=str(checkpoint)
+    )
+    assert with_checkpoint.card_detector_backend == "yolo"
+    without_checkpoint = Settings(
+        _env_file=None, ekyc_api_key="test", card_yolo_model_path=str(tmp_path / "missing.pt")
+    )
+    assert without_checkpoint.card_detector_backend == "opencv"
+
+
 @pytest.mark.parametrize(
     ("task", "shape", "names"),
     [
@@ -147,10 +170,36 @@ def test_incompatible_checkpoint_rejected(settings, tmp_path, monkeypatch, task,
 def test_no_or_multiple_cards_rejected(image, settings, count):
     from threading import Lock
 
+    class Array:
+        def __init__(self, value):
+            self.value = np.asarray(value, dtype=np.float32)
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self.value
+
+        def __len__(self):
+            return len(self.value)
+
+    class Boxes:
+        def __init__(self):
+            self.xyxy = Array(np.zeros((count, 4), np.float32))
+            self.conf = Array(np.zeros(count, np.float32))
+
+        def __len__(self):
+            return count
+
+    class Keypoints:
+        def __init__(self):
+            self.xy = Array(np.zeros((count, 4, 2), np.float32))
+            self.conf = Array(np.zeros((count, 4), np.float32))
+
     detector = object.__new__(YoloCardDetector)
     detector.settings, detector._lock = settings, Lock()
     detector.model = SimpleNamespace(
-        predict=lambda *args, **kwargs: [SimpleNamespace(boxes=[0] * count)]
+        predict=lambda *args, **kwargs: [SimpleNamespace(boxes=Boxes(), keypoints=Keypoints())]
     )
     with pytest.raises(EkycError) as error:
         detector.detect(image)
@@ -174,6 +223,10 @@ def test_bbox_at_border_does_not_block_when_keypoints_inside(image, settings):
             return self.value
 
     class Boxes:
+        def __init__(self):
+            self.xyxy = Array([[100, 0, 700, 500]])
+            self.conf = Array([0.9])
+
         def __len__(self):
             return 1
 

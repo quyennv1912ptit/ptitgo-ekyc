@@ -16,7 +16,12 @@ class SampleBody(CamelModel):
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(_env_file=None, ekyc_api_key="test-key", ocr_backend="none")
+    return Settings(
+        _env_file=None,
+        ekyc_api_key="test-key",
+        ocr_backend="none",
+        card_detector_backend="opencv",
+    )
 
 
 @pytest.fixture

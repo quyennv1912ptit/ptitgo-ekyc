@@ -6,7 +6,11 @@ import numpy as np
 
 from ekyc.config import Settings
 from ekyc.core.errors import EkycError, ErrorCode
-from ekyc.pipeline.geometry import GateStatus, evaluate_card_gate
+from ekyc.pipeline.geometry import (
+    IMAGE_TOO_SMALL_MESSAGE,
+    GateStatus,
+    evaluate_card_gate,
+)
 from ekyc.schemas.common import Warning
 
 
@@ -58,6 +62,8 @@ class DefaultCardPreparer:
         """Gate hình học trên ảnh gốc; BLOCK ném lỗi, PASS_REVIEW trả cảnh báo."""
         outcome = evaluate_card_gate(quad, width, height, self.settings)
         if outcome.status is GateStatus.BLOCK:
+            if outcome.error_code is ErrorCode.IMAGE_TOO_SMALL:
+                raise EkycError(ErrorCode.IMAGE_TOO_SMALL, IMAGE_TOO_SMALL_MESSAGE)
             raise EkycError(outcome.error_code or ErrorCode.CARD_NOT_FOUND)
         return outcome.warnings
 

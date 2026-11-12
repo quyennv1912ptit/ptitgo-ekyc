@@ -9,6 +9,7 @@ class ErrorCode(str, Enum):  # noqa: UP042 - Theo hợp đồng đặc tả.
     IMAGE_GLARE = "IMAGE_GLARE"
     CARD_NOT_FOUND = "CARD_NOT_FOUND"
     CARD_CROPPED = "CARD_CROPPED"
+    MULTIPLE_CARDS = "MULTIPLE_CARDS"
     IMAGE_TOO_DARK = "IMAGE_TOO_DARK"
     IMAGE_TOO_SMALL = "IMAGE_TOO_SMALL"
     WRONG_DOCUMENT_TYPE = "WRONG_DOCUMENT_TYPE"
@@ -68,6 +69,9 @@ ERROR_META: dict[ErrorCode, ErrorMeta] = {
         200, False, "Không tìm thấy giấy tờ, hãy chụp lại rõ toàn bộ thẻ."
     ),
     ErrorCode.CARD_CROPPED: ErrorMeta(200, False, "Giấy tờ bị xén, hãy chụp đủ bốn góc."),
+    ErrorCode.MULTIPLE_CARDS: ErrorMeta(
+        200, False, "Ảnh có nhiều giấy tờ, hãy chụp riêng từng giấy tờ."
+    ),
     ErrorCode.IMAGE_TOO_DARK: ErrorMeta(200, False, "Ảnh quá tối, hãy chụp lại ở nơi đủ sáng."),
     ErrorCode.IMAGE_TOO_SMALL: ErrorMeta(
         200, False, "Ảnh quá nhỏ, hãy chọn ảnh có độ phân giải cao hơn."
