@@ -6,8 +6,10 @@ import pytest
 
 from ekyc.config import Settings
 from ekyc.core.errors import EkycError, ErrorCode, WarningCode
+from ekyc.pipeline.card_image import PreparedCard
 from ekyc.pipeline.doc_classifier import DocClassifier
 from ekyc.pipeline.ocr.base import OcrLine
+from ekyc.schemas.common import Warning
 from ekyc.services.cccd_service import CccdService, resize_for_ocr
 
 TODAY = date(2026, 11, 10)
@@ -50,14 +52,15 @@ class FakePreparer:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.fail: ErrorCode | None = None
+        self.warnings: tuple[Warning, ...] = ()
 
-    def prepare(self, url: str) -> np.ndarray:
+    def prepare(self, url: str) -> PreparedCard:
         self.calls.append(url)
         if self.fail:
             raise EkycError(self.fail, details=[{"extra": "retained"}])
         image = np.zeros((600, 1000, 3), dtype=np.uint8)
         image[0, 0] = 1 if "front" in url else 2
-        return image
+        return PreparedCard(image, self.warnings)
 
 
 class FakeOcr:
@@ -151,6 +154,15 @@ def test_warnings(service: CccdService) -> None:
     )
     assert any(w.code == WarningCode.LOW_OCR_CONFIDENCE for w in result.warnings)
     assert any(w.code == WarningCode.ID_STRUCTURE_MISMATCH for w in result.warnings)
+
+
+def test_low_resolution_warning_marks_review(service: CccdService) -> None:
+    service.preparer.warnings = (
+        Warning(code=WarningCode.LOW_RESOLUTION, message="Độ phân giải ảnh thấp."),
+    )
+    result = service.run("front", "back", today=TODAY)
+    assert any(w.code == WarningCode.LOW_RESOLUTION for w in result.warnings)
+    assert result.data.review_required
 
 
 def test_image_error_and_early_stop(service: CccdService) -> None:

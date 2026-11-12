@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     blur_threshold: float = Field(default=100, ge=0)
     glare_ratio_max: float = Field(default=0.04, ge=0, le=1)
     card_detector_backend: Literal["opencv", "yolo"] = "opencv"
-    card_yolo_model_path: str = "models/card_yolov8n_pose.pt"
+    card_yolo_model_path: str = "models/card_pose_v3_best.pt"
     card_yolo_imgsz: int = Field(default=640, ge=64)
     card_yolo_conf: float = Field(default=0.25, gt=0, le=1)
     card_yolo_keypoint_conf: float = Field(default=0.4, gt=0, le=1)
@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     card_aspect_ratio_max: float = Field(default=2.1, gt=1)
     card_output_width: int = Field(default=1600, ge=64)
     card_output_height: int = Field(default=1009, ge=64)
+    # Ngưỡng khởi điểm cho gate hình học trước warp; cần chỉnh bằng ảnh thật.
+    card_min_long_side_px: int = Field(default=600, gt=0)
+    card_ok_long_side_px: int = Field(default=1000, gt=0)
+    card_edge_margin_px: int = Field(default=5, ge=0)
     quality_profile: Literal["strict", "evaluation", "calibration"] = "strict"
     evaluation_blur_threshold: float = Field(default=20, ge=0)
     evaluation_glare_ratio_max: float = Field(default=0.15, ge=0, le=1)
@@ -133,6 +137,8 @@ class Settings(BaseSettings):
             raise ValueError("NAME_MATCH_BLOCK must be <= NAME_MATCH_WARN")
         if self.card_aspect_ratio_min > self.card_aspect_ratio_max:
             raise ValueError("CARD_ASPECT_RATIO_MIN must be <= CARD_ASPECT_RATIO_MAX")
+        if self.card_min_long_side_px > self.card_ok_long_side_px:
+            raise ValueError("CARD_MIN_LONG_SIDE_PX must be <= CARD_OK_LONG_SIDE_PX")
         if self.card_output_width <= self.card_output_height:
             raise ValueError("Card output must be landscape")
         if self.env == "prod" and self.quality_profile == "evaluation":

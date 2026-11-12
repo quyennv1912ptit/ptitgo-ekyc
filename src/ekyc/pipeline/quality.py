@@ -161,3 +161,18 @@ def check_image_quality(
         glare_ratio=glare_ratio,
         blur_score=blur_score,
     )
+
+
+# Crop đã nắn không chặn theo kích thước: gate hình học trên ảnh gốc đã quyết định.
+WARPED_MIN_SIDE_PX = 1
+
+
+def check_warped_quality(image: np.ndarray | LoadedImage, settings: Settings) -> QualityMetrics:
+    """Kiểm tra blur, glare, độ sáng trên crop đã nắn, bỏ qua ngưỡng kích thước."""
+    metrics, errors = inspect_image_quality(
+        image, settings.model_copy(update={"min_image_side_px": WARPED_MIN_SIDE_PX})
+    )
+    for code in (ErrorCode.IMAGE_TOO_DARK, ErrorCode.IMAGE_GLARE, ErrorCode.IMAGE_BLURRY):
+        if code in errors:
+            raise EkycError(code)
+    return metrics

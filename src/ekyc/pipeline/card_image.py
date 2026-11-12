@@ -1,13 +1,25 @@
+from dataclasses import dataclass
 from typing import Protocol
 
 import cv2
 import numpy as np
 
 from ekyc.config import Settings
+from ekyc.core.errors import EkycError, ErrorCode
+from ekyc.pipeline.geometry import GateStatus, evaluate_card_gate
+from ekyc.schemas.common import Warning
+
+
+@dataclass(frozen=True)
+class PreparedCard:
+    """Ảnh thẻ đã chuẩn hóa kèm cảnh báo phát sinh ở tầng chuẩn bị ảnh."""
+
+    image: np.ndarray
+    warnings: tuple[Warning, ...] = ()
 
 
 class CardImagePreparer(Protocol):
-    def prepare(self, url: str) -> np.ndarray: ...
+    def prepare(self, url: str) -> PreparedCard: ...
 
 
 class DefaultCardPreparer:
@@ -19,7 +31,7 @@ class DefaultCardPreparer:
 
             self.detector = YoloCardDetector(settings)
 
-    def prepare(self, url: str) -> np.ndarray:
+    def prepare(self, url: str) -> PreparedCard:
         try:
             from ekyc.pipeline.card_detector import detect_and_warp_card
             from ekyc.pipeline.image_loader import load_image_from_url_sync
@@ -37,15 +49,25 @@ class DefaultCardPreparer:
             if self.detector is not None
             else detect_and_warp_card(loaded)
         )
-        return self.finish(result.warped_image)
+        warnings: tuple[Warning, ...] = ()
+        if self.settings.quality_profile != "calibration":
+            warnings = self.gate(result.corners, loaded.width, loaded.height)
+        return PreparedCard(self.finish(result.warped_image), warnings)
+
+    def gate(self, quad: np.ndarray, width: int, height: int) -> tuple[Warning, ...]:
+        """Gate hình học trên ảnh gốc; BLOCK ném lỗi, PASS_REVIEW trả cảnh báo."""
+        outcome = evaluate_card_gate(quad, width, height, self.settings)
+        if outcome.status is GateStatus.BLOCK:
+            raise EkycError(outcome.error_code or ErrorCode.CARD_NOT_FOUND)
+        return outcome.warnings
 
     def finish(self, image: np.ndarray) -> np.ndarray:
         # Xoay hình dọc sang ngang; hướng chữ 180 độ vẫn do luồng OCR hiện tại xử lý.
         if image.shape[0] > image.shape[1]:
             image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-        from ekyc.pipeline.quality import check_image_quality
+        from ekyc.pipeline.quality import check_warped_quality
 
-        check_image_quality(image, quality_settings(self.settings))
+        check_warped_quality(image, quality_settings(self.settings))
         if self.settings.quality_profile == "calibration":
             return image
         return cv2.resize(

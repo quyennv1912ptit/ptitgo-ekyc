@@ -8,6 +8,7 @@ from ekyc.config import Settings
 from ekyc.core.errors import EkycError, ErrorCode
 from ekyc.pipeline.card_detector import order_points
 from ekyc.pipeline.card_image import DefaultCardPreparer, quality_settings
+from ekyc.pipeline.geometry import GateStatus, evaluate_card_gate
 from ekyc.pipeline.yolo_card_detector import YoloCardDetector, rectify_corners
 
 
@@ -60,7 +61,7 @@ def test_reject_bad_corners(image, corners, settings, bad):
 def test_quality_runs_on_native_landscape_before_resize(settings, monkeypatch):
     observed = []
     monkeypatch.setattr(
-        "ekyc.pipeline.quality.check_image_quality",
+        "ekyc.pipeline.quality.check_warped_quality",
         lambda image, config: observed.append(image.shape),
     )
     result = DefaultCardPreparer(settings).finish(np.zeros((400, 250, 3), np.uint8))
@@ -75,14 +76,23 @@ def test_evaluation_quality_profile(settings):
     assert evaluation.glare_ratio_max == 0.15
     assert evaluation.min_image_side_px == 320
     assert settings.blur_threshold == 100
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, ekyc_api_key="test", env="prod", quality_profile="evaluation")
+    for profile in ("evaluation", "calibration"):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, ekyc_api_key="test", env="prod", quality_profile=profile)
+
+
+def test_quality_settings_rejects_calibration_in_prod(settings):
+    config = settings.model_copy(update={"env": "prod", "quality_profile": "calibration"})
+    with pytest.raises(ValueError):
+        quality_settings(config)
 
 
 def test_native_small_image_cannot_bypass_gate_by_resize(settings):
-    with pytest.raises(EkycError) as error:
-        DefaultCardPreparer(settings).finish(np.full((400, 700, 3), 128, np.uint8))
-    assert error.value.code == ErrorCode.IMAGE_TOO_SMALL
+    # Thẻ dài 599 px trên ảnh gốc: gate chặn trước; resize về 1600 px không cứu được.
+    quad = np.array([[20, 20], [619, 20], [619, 400], [20, 400]], dtype=np.float32)
+    outcome = evaluate_card_gate(quad, 800, 500, settings)
+    assert outcome.status is GateStatus.BLOCK
+    assert outcome.error_code is ErrorCode.IMAGE_TOO_SMALL
 
 
 def test_evaluation_still_rejects_severe_blur(settings):
@@ -147,24 +157,34 @@ def test_no_or_multiple_cards_rejected(image, settings, count):
     assert error.value.code == ErrorCode.CARD_NOT_FOUND
 
 
-def test_bbox_at_border_rejected_before_inferred_corners(image, settings):
+def test_bbox_at_border_does_not_block_when_keypoints_inside(image, settings):
     from threading import Lock
 
-    class Boxes:
-        xyxy = [
-            SimpleNamespace(
-                cpu=lambda: SimpleNamespace(numpy=lambda: np.array([100, 0, 700, 500], np.float32))
-            )
-        ]
+    class Array:
+        def __init__(self, value):
+            self.value = np.asarray(value, dtype=np.float32)
 
+        def __getitem__(self, item):
+            return Array(self.value[item])
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self.value
+
+    class Boxes:
         def __len__(self):
             return 1
 
+    points = [[100, 20], [700, 20], [700, 480], [100, 480]]
+    keypoints = SimpleNamespace(xy=Array([points]), conf=Array([[1.0, 1.0, 1.0, 1.0]]))
     detector = object.__new__(YoloCardDetector)
     detector.settings, detector._lock = settings, Lock()
     detector.model = SimpleNamespace(
-        predict=lambda *args, **kwargs: [SimpleNamespace(boxes=Boxes())]
+        predict=lambda *args, **kwargs: [SimpleNamespace(boxes=Boxes(), keypoints=keypoints)]
     )
-    with pytest.raises(EkycError) as error:
-        detector.detect(image)
-    assert error.value.code == ErrorCode.CARD_CROPPED
+    result = detector.detect(image)
+    assert result.warped_image.shape[1] > result.warped_image.shape[0]
+    gate = evaluate_card_gate(np.asarray(points, np.float32), 800, 600, settings)
+    assert gate.status is not GateStatus.BLOCK

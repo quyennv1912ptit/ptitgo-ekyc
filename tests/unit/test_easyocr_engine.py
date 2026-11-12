@@ -35,10 +35,11 @@ def test_engine_without_model_download(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_card_preparer(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     image = np.zeros((50, 80, 3), dtype=np.uint8)
     calls = []
+    config = settings.model_copy(update={"quality_profile": "calibration"})
 
-    def load(url: str, config: Settings) -> object:
+    def load(url: str, settings_arg: Settings) -> object:
         calls.append("load")
-        assert config is settings
+        assert settings_arg is config
         return image
 
     def quality(loaded: object, config: Settings) -> None:
@@ -50,10 +51,10 @@ def test_card_preparer(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> N
         return SimpleNamespace(warped_image=image)
 
     monkeypatch.setattr("ekyc.pipeline.image_loader.load_image_from_url_sync", load)
-    monkeypatch.setattr("ekyc.pipeline.quality.check_image_quality", quality)
+    monkeypatch.setattr("ekyc.pipeline.quality.check_warped_quality", quality)
     monkeypatch.setattr("ekyc.pipeline.card_detector.detect_and_warp_card", warp)
-    prepared = DefaultCardPreparer(settings).prepare("unused")
-    assert prepared.shape == (settings.card_output_height, settings.card_output_width, 3)
+    prepared = DefaultCardPreparer(config).prepare("unused")
+    assert prepared.image.shape == image.shape
     assert calls == ["load", "warp", "quality"]
 
 

@@ -11,6 +11,7 @@ from ekyc.pipeline.quality import (
     calculate_glare_ratio,
     check_image_quality,
     check_image_size,
+    check_warped_quality,
     inspect_image_quality,
 )
 
@@ -130,3 +131,15 @@ def test_inspect_image_quality_multiple_errors(settings: Settings) -> None:
     assert ErrorCode.IMAGE_TOO_SMALL in errors
     assert ErrorCode.IMAGE_TOO_DARK in errors
     assert ErrorCode.IMAGE_BLURRY in errors
+
+
+def test_warped_quality_ignores_size(settings: Settings) -> None:
+    small_but_sharp = create_sharp_image(width=120, height=80)
+    metrics = check_warped_quality(small_but_sharp, settings)
+    assert metrics.min_side_px == 80
+
+
+def test_warped_quality_still_rejects_blur(settings: Settings) -> None:
+    with pytest.raises(EkycError) as exc_info:
+        check_warped_quality(np.full((400, 700, 3), 128, dtype=np.uint8), settings)
+    assert exc_info.value.code == ErrorCode.IMAGE_BLURRY

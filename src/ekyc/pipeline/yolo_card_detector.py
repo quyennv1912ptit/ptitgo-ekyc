@@ -8,6 +8,7 @@ import numpy as np
 from ekyc.config import Settings
 from ekyc.core.errors import EkycError, ErrorCode
 from ekyc.pipeline.card_detector import CardDetectionResult, order_points, warp_card
+from ekyc.pipeline.geometry import any_corner_outside
 
 
 class YoloCardDetector:
@@ -46,13 +47,6 @@ class YoloCardDetector:
         result = results[0]
         if len(result.boxes) != 1:
             raise EkycError(ErrorCode.CARD_NOT_FOUND, "Ảnh có nhiều thẻ, hãy chụp riêng một thẻ.")
-        # Góc pose có thể được model suy đoán vào trong ảnh dù thẻ đã mất góc.
-        # Chặn thêm khi bbox chạm mép, tránh nắn từ những góc được suy đoán này.
-        bounds = result.boxes.xyxy[0].cpu().numpy().reshape(2, 2)
-        if self.settings.quality_profile != "calibration" and touches_border(
-            bounds, image.shape[:2], self.settings.card_yolo_border_ratio
-        ):
-            raise EkycError(ErrorCode.CARD_CROPPED)
         if result.keypoints is None or result.keypoints.conf is None:
             raise EkycError(ErrorCode.CARD_NOT_FOUND)
         points = result.keypoints.xy[0].cpu().numpy().astype(np.float32)
@@ -80,9 +74,8 @@ def rectify_corners(
     area = cv2.contourArea(corners)
     if area < settings.card_yolo_min_area_ratio * width * height:
         raise EkycError(ErrorCode.CARD_NOT_FOUND)
-    if settings.quality_profile != "calibration" and touches_border(
-        corners, (height, width), settings.card_yolo_border_ratio
-    ):
+    # Góc nằm ngoài ảnh thì không thể nắn; ngưỡng 5 px do gate hình học quyết định.
+    if any_corner_outside(corners, width, height):
         raise EkycError(ErrorCode.CARD_CROPPED)
     warped = warp_card(image, corners)
     h, w = warped.shape[:2]

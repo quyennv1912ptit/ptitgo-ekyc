@@ -102,13 +102,13 @@ class CccdService:
                 else datetime.now(ZoneInfo(self.settings.timezone)).date()
             )
             with image_errors("front"):
-                front_image = self.preparer.prepare(front_url)
+                front_card = self.preparer.prepare(front_url)
             with image_errors("back"):
-                back_image = self.preparer.prepare(back_url)
+                back_card = self.preparer.prepare(back_url)
             with image_errors("front"):
-                front_lines, front_cls = self._read(front_image, deadline)
+                front_lines, front_cls = self._read(front_card.image, deadline)
             with image_errors("back"):
-                back_lines, back_cls = self._read(back_image, deadline)
+                back_lines, back_cls = self._read(back_card.image, deadline)
             if (
                 front_cls.doc_type == back_cls.doc_type == DocType.CCCD
                 and front_cls.side == Side.BACK
@@ -133,7 +133,7 @@ class CccdService:
                     raise EkycError(code, details=[{"image": "front", "fields": affected}])
             if front.expiry.value is not None and front.expiry.value < today:
                 raise EkycError(ErrorCode.DOCUMENT_EXPIRED, details=[{"image": "front"}])
-            warnings: list[Warning] = []
+            warnings: list[Warning] = [*front_card.warnings, *back_card.warnings]
             optional = {
                 "gender": (front.gender, "giới tính"),
                 "placeOfOrigin": (front.origin, "quê quán"),
@@ -188,6 +188,7 @@ class CccdService:
                         ),
                     )
                 )
+            low_resolution = any(warning.code == WarningCode.LOW_RESOLUTION for warning in warnings)
             data = CccdData(
                 id_number=front.id_number.value,
                 full_name=front.full_name.value,
@@ -200,7 +201,7 @@ class CccdService:
                 issue_date=back.issue_date.value,
                 field_confidence=confidence,
                 review_fields=review_fields,
-                review_required=bool(review_fields),
+                review_required=bool(review_fields) or low_resolution,
             )
             logger.info(
                 "doc_type=CCCD side=FRONT/BACK status=%s elapsed_s=%.3f",

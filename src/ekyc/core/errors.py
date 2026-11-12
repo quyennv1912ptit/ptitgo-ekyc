@@ -42,6 +42,7 @@ class WarningCode(str, Enum):  # noqa: UP042 - Theo hợp đồng đặc tả.
     LAYOUT_UNCERTAIN = "LAYOUT_UNCERTAIN"
     FIELD_NOT_FOUND = "FIELD_NOT_FOUND"
     ID_STRUCTURE_MISMATCH = "ID_STRUCTURE_MISMATCH"
+    LOW_RESOLUTION = "LOW_RESOLUTION"
 
 
 @dataclass(frozen=True)
