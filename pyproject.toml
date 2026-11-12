@@ -1,0 +1,60 @@
+[project]
+name = "ekyc"
+version = "0.1.0"
+description = "Internal Vietnamese document OCR and face verification service"
+readme = "README.md"
+authors = [
+    { name = "quyennv1912ptit", email = "quyennv19122006@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.6",
+    "torchvision>=0.21",
+    "deepface>=0.0.104",
+    "easyocr>=1.7.2",
+    "fastapi[standard]>=0.162.2",
+    "httpx>=0.28.1",
+    "numpy>=2.4.6",
+    "opencv-python-headless>=5.0.0.93",
+    "pillow>=13.0.0",
+    "pydantic-settings>=2.16.2",
+    "rapidfuzz>=3.14.6",
+    "tf-keras>=2.21.0",
+    "unidecode>=1.4.0",
+    "tzdata>=2026.6",
+    "ultralytics>=8.3,<9",
+    "huggingface-hub>=2.4.0",
+    "albumentations>=2.0.8",
+    "opencv-python>=5.0.0.93",
+    "scikit-learn>=1.9.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

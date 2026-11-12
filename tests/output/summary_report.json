@@ -1,0 +1,98 @@
+[
+  {
+    "file": "cccd_back.jpg",
+    "quality": {
+      "width": 960,
+      "height": 1280,
+      "min_side_px": 960,
+      "brightness": 107.06,
+      "glare_ratio": 0.0,
+      "blur_score": 969.5,
+      "errors": [
+        "IMAGE_TOO_SMALL"
+      ],
+      "is_passed": false
+    },
+    "card_detector": {
+      "detected": false,
+      "is_cropped": true,
+      "corners": null,
+      "warped_size": null,
+      "aspect_ratio": null,
+      "error": "CARD_CROPPED",
+      "message": "Giấy tờ bị xén, hãy chụp đủ bốn góc."
+    }
+  },
+  {
+    "file": "cccd_front.jpg",
+    "quality": {
+      "width": 960,
+      "height": 1280,
+      "min_side_px": 960,
+      "brightness": 86.88,
+      "glare_ratio": 0.0,
+      "blur_score": 388.02,
+      "errors": [
+        "IMAGE_TOO_SMALL"
+      ],
+      "is_passed": false
+    },
+    "card_detector": {
+      "detected": false,
+      "is_cropped": true,
+      "corners": null,
+      "warped_size": null,
+      "aspect_ratio": null,
+      "error": "CARD_CROPPED",
+      "message": "Giấy tờ bị xén, hãy chụp đủ bốn góc."
+    }
+  },
+  {
+    "file": "gplx_back.jpg",
+    "quality": {
+      "width": 960,
+      "height": 1280,
+      "min_side_px": 960,
+      "brightness": 101.24,
+      "glare_ratio": 0.0,
+      "blur_score": 724.45,
+      "errors": [
+        "IMAGE_TOO_SMALL"
+      ],
+      "is_passed": false
+    },
+    "card_detector": {
+      "detected": false,
+      "is_cropped": true,
+      "corners": null,
+      "warped_size": null,
+      "aspect_ratio": null,
+      "error": "CARD_CROPPED",
+      "message": "Giấy tờ bị xén, hãy chụp đủ bốn góc."
+    }
+  },
+  {
+    "file": "gplx_front.jpg",
+    "quality": {
+      "width": 960,
+      "height": 1280,
+      "min_side_px": 960,
+      "brightness": 105.88,
+      "glare_ratio": 0.0,
+      "blur_score": 419.51,
+      "errors": [
+        "IMAGE_TOO_SMALL"
+      ],
+      "is_passed": false
+    },
+    "card_detector": {
+      "detected": false,
+      "is_cropped": true,
+      "corners": null,
+      "warped_size": null,
+      "aspect_ratio": null,
+      "error": "CARD_CROPPED",
+      "message": "Giấy tờ bị xén, hãy chụp đủ bốn góc."
+    }
+  }
+]
