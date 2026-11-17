@@ -7,7 +7,6 @@ from threading import BoundedSemaphore
 from time import monotonic
 from zoneinfo import ZoneInfo
 
-import cv2
 import numpy as np
 
 from ekyc.config import Settings
@@ -17,16 +16,17 @@ from ekyc.pipeline.card_image import CardImagePreparer
 from ekyc.pipeline.doc_classifier import DocClassifier
 from ekyc.pipeline.doc_types import DocClassification, DocType, Side
 from ekyc.pipeline.ocr.base import OcrEngine, OcrLine
-from ekyc.pipeline.ocr.line_grouping import group_into_lines
 from ekyc.pipeline.parsers.cccd_checks import (
     REVIEW_ORDER,
     check_id_structure,
     collect_review_fields,
 )
-from ekyc.pipeline.parsers.cccd_parser import Field, parse_cccd_back, parse_cccd_front
+from ekyc.pipeline.parsers.cccd_parser import Field
 from ekyc.schemas.cccd import CccdData
 from ekyc.schemas.common import Warning
 from ekyc.services.doc_validation import ensure_document
+from ekyc.services.document_extraction import DocumentExtractor
+from ekyc.services.document_extraction import resize_for_ocr as resize_for_ocr
 
 logger = logging.getLogger(__name__)
 
@@ -47,64 +47,53 @@ def image_errors(image: str) -> Iterator[None]:
         raise EkycError(exc.code, exc.message, details=details) from exc
 
 
-def resize_for_ocr(image: np.ndarray, max_side: int) -> np.ndarray:
-    height, width = image.shape[:2]
-    scale = min(1.0, max_side / max(height, width))
-    if scale == 1:
-        return image
-    return cv2.resize(
-        image,
-        (max(1, round(width * scale)), max(1, round(height * scale))),
-        interpolation=cv2.INTER_AREA,
-    )
+def check_deadline(deadline: float) -> None:
+    if monotonic() >= deadline:
+        raise EkycError(ErrorCode.ENGINE_TIMEOUT)
 
 
 class CccdService:
     def __init__(
         self,
         settings: Settings,
-        preparer: CardImagePreparer,
-        ocr_engine: OcrEngine,
+        preparer: CardImagePreparer | None,
+        ocr_engine: OcrEngine | None,
         classifier: DocClassifier,
         job_slots: BoundedSemaphore,
     ) -> None:
         self.settings, self.preparer = settings, preparer
         self.ocr_engine, self.classifier, self.job_slots = ocr_engine, classifier, job_slots
+        self.extraction = DocumentExtractor(settings, preparer, ocr_engine, classifier)
 
     def _read(self, image: np.ndarray, deadline: float) -> tuple[list[OcrLine], DocClassification]:
-        resized = resize_for_ocr(image, self.settings.ocr_max_side_px)
+        def check() -> None:
+            check_deadline(deadline)
 
-        def attempt(img: np.ndarray) -> tuple[list[OcrLine], DocClassification]:
-            boxes = self.ocr_engine.read_lines(img)
-            if monotonic() > deadline:
-                raise EkycError(ErrorCode.ENGINE_TIMEOUT)
-            lines = group_into_lines(
-                boxes,
-                row_tolerance=self.settings.line_row_tolerance,
-                gap_ratio=self.settings.line_gap_ratio,
-            )
-            return lines, self.classifier.classify(lines, img.shape[0])
+        return self.extraction.read_strict(image, check)
 
-        lines, result = attempt(resized)
-        if result.doc_type == DocType.UNKNOWN and self.settings.ocr_retry_rotate_180:
-            rotated_lines, rotated = attempt(cv2.rotate(resized, cv2.ROTATE_180))
-            if (rotated.readable, rotated.score) > (result.readable, result.score):
-                return rotated_lines, rotated
-        return lines, result
-
-    def run(self, front_url: str, back_url: str, *, today: date | None = None) -> CccdResult:
+    def run(
+        self,
+        front_url: str,
+        back_url: str,
+        *,
+        today: date | None = None,
+        deadline: float | None = None,
+    ) -> CccdResult:
         with job_slot(self.job_slots, self.settings.job_slot_timeout_s):
             started = monotonic()
-            deadline = started + self.settings.cccd_timeout_s
+            if deadline is None:
+                deadline = started + self.settings.cccd_timeout_s
             today = (
                 today
                 if today is not None
                 else datetime.now(ZoneInfo(self.settings.timezone)).date()
             )
             with image_errors("front"):
-                front_card = self.preparer.prepare(front_url)
+                check_deadline(deadline)
+                front_card = self.extraction.prepare_url(front_url)
             with image_errors("back"):
-                back_card = self.preparer.prepare(back_url)
+                check_deadline(deadline)
+                back_card = self.extraction.prepare_url(back_url)
             with image_errors("front"):
                 front_lines, front_cls = self._read(front_card.image, deadline)
             with image_errors("back"):
@@ -118,11 +107,13 @@ class CccdService:
                 front_cls, back_cls = back_cls, front_cls
                 logger.debug("cccd_sides_swapped")
             with image_errors("front"):
+                check_deadline(deadline)
                 ensure_document(front_cls, expected_type=DocType.CCCD, expected_side=Side.FRONT)
-                front = parse_cccd_front(front_lines, self.settings, today)
+                front = self.extraction.parse("cccd_front", front_lines, today)
             with image_errors("back"):
+                check_deadline(deadline)
                 ensure_document(back_cls, expected_type=DocType.CCCD, expected_side=Side.BACK)
-                back = parse_cccd_back(back_lines, self.settings)
+                back = self.extraction.parse("cccd_back", back_lines, today)
             required = {"idNumber": front.id_number, "fullName": front.full_name, "dob": front.dob}
             for status, code in (
                 ("missing", ErrorCode.FIELD_MISSING),
@@ -188,8 +179,16 @@ class CccdService:
                         ),
                     )
                 )
-            low_resolution = any(warning.code == WarningCode.LOW_RESOLUTION for warning in warnings)
-            if low_resolution:
+            image_review = any(
+                warning.code
+                in (
+                    WarningCode.LOW_RESOLUTION,
+                    WarningCode.LOW_KEYPOINT_CONFIDENCE,
+                    WarningCode.CARD_GEOMETRY_UNCERTAIN,
+                )
+                for warning in warnings
+            )
+            if image_review:
                 parsed = {name for name, field in all_fields.items() if field.status == "parsed"}
                 review = set(review_fields) | parsed
                 review_fields = [name for name in REVIEW_ORDER if name in review]
@@ -205,8 +204,9 @@ class CccdService:
                 issue_date=back.issue_date.value,
                 field_confidence=confidence,
                 review_fields=review_fields,
-                review_required=bool(review_fields) or low_resolution,
+                review_required=bool(review_fields) or image_review,
             )
+            check_deadline(deadline)
             logger.info(
                 "doc_type=CCCD side=FRONT/BACK status=%s elapsed_s=%.3f",
                 {name: field.status for name, field in all_fields.items()},

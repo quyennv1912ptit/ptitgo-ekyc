@@ -13,8 +13,11 @@ logger = logging.getLogger(__name__)
 
 
 def error_response(request: Request, error: EkycError, status: int | None = None) -> JSONResponse:
+    request.state.ekyc_error_code = error.code
     identifier = getattr(request.state, "request_id", "-")
     headers = {"X-Request-ID": identifier}
+    if request.url.path.startswith("/ekyc/driver-verification/"):
+        headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
     if error.code == ErrorCode.ENGINE_BUSY:
         headers["Retry-After"] = "1"
     return JSONResponse(
@@ -38,7 +41,11 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        code = {404: ErrorCode.NOT_FOUND, 405: ErrorCode.METHOD_NOT_ALLOWED}.get(
+        code = {
+            404: ErrorCode.NOT_FOUND,
+            405: ErrorCode.METHOD_NOT_ALLOWED,
+            413: ErrorCode.IMAGE_TOO_LARGE,
+        }.get(
             exc.status_code, ErrorCode.INVALID_REQUEST
         )
         return error_response(request, EkycError(code), exc.status_code)

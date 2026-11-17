@@ -7,11 +7,24 @@ from ekyc.pipeline.ocr.base import OcrLine
 
 class EasyOcrEngine:
     def __init__(
-        self, languages: list[str], *, gpu: bool = False, width_ths: float | None = None
+        self,
+        languages: list[str],
+        *,
+        gpu: bool = False,
+        width_ths: float | None = None,
+        download_enabled: bool = True,
+        model_storage_directory: str | None = None,
     ) -> None:
         import easyocr
 
-        self.reader = easyocr.Reader(languages, gpu=gpu)
+        options = (
+            {}
+            if model_storage_directory is None
+            else {"model_storage_directory": model_storage_directory}
+        )
+        self.reader = easyocr.Reader(
+            languages, gpu=gpu, download_enabled=download_enabled, **options
+        )
         self._lock = Lock()
         self.width_ths = width_ths
 

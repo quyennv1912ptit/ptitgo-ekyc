@@ -16,6 +16,8 @@ class ErrorCode(str, Enum):  # noqa: UP042 - Theo hợp đồng đặc tả.
     WRONG_SIDE = "WRONG_SIDE"
     UNREADABLE_DOCUMENT = "UNREADABLE_DOCUMENT"
     DOCUMENT_EXPIRED = "DOCUMENT_EXPIRED"
+    WARNING_ACK_REQUIRED = "WARNING_ACK_REQUIRED"
+    VERIFICATION_ACTIVATION_BLOCKED = "VERIFICATION_ACTIVATION_BLOCKED"
     FIELD_MISSING = "FIELD_MISSING"
     INVALID_FIELD_FORMAT = "INVALID_FIELD_FORMAT"
     IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
@@ -25,11 +27,18 @@ class ErrorCode(str, Enum):  # noqa: UP042 - Theo hợp đồng đặc tả.
     FACE_MISMATCH = "FACE_MISMATCH"
     INVALID_REQUEST = "INVALID_REQUEST"
     URL_NOT_ALLOWED = "URL_NOT_ALLOWED"
+    DOCUMENT_REMOVED = "DOCUMENT_REMOVED"
+    FORBIDDEN = "FORBIDDEN"
+    REVISION_CONFLICT = "REVISION_CONFLICT"
+    INVALID_TRANSITION = "INVALID_TRANSITION"
+    IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    VERIFICATION_UNAVAILABLE = "VERIFICATION_UNAVAILABLE"
     UNAUTHORIZED = "UNAUTHORIZED"
     NOT_FOUND = "NOT_FOUND"
     METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
     RATE_LIMITED = "RATE_LIMITED"
     IMAGE_FETCH_FAILED = "IMAGE_FETCH_FAILED"
+    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
     ENGINE_BUSY = "ENGINE_BUSY"
     ENGINE_TIMEOUT = "ENGINE_TIMEOUT"
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -44,6 +53,8 @@ class WarningCode(str, Enum):  # noqa: UP042 - Theo hợp đồng đặc tả.
     FIELD_NOT_FOUND = "FIELD_NOT_FOUND"
     ID_STRUCTURE_MISMATCH = "ID_STRUCTURE_MISMATCH"
     LOW_RESOLUTION = "LOW_RESOLUTION"
+    LOW_KEYPOINT_CONFIDENCE = "LOW_KEYPOINT_CONFIDENCE"
+    CARD_GEOMETRY_UNCERTAIN = "CARD_GEOMETRY_UNCERTAIN"
 
 
 @dataclass(frozen=True)
@@ -54,6 +65,12 @@ class ErrorMeta:
 
 
 ERROR_META: dict[ErrorCode, ErrorMeta] = {
+    ErrorCode.DOCUMENT_REMOVED: ErrorMeta(410, False, "Document is no longer available."),
+    ErrorCode.FORBIDDEN: ErrorMeta(403, False, "Access denied."),
+    ErrorCode.REVISION_CONFLICT: ErrorMeta(409, False, "Reload the current revision."),
+    ErrorCode.INVALID_TRANSITION: ErrorMeta(409, False, "Action unavailable in this state."),
+    ErrorCode.IDEMPOTENCY_CONFLICT: ErrorMeta(409, False, "Idempotency key already used."),
+    ErrorCode.VERIFICATION_UNAVAILABLE: ErrorMeta(503, True, "Verification unavailable."),
     ErrorCode.UNREADABLE_DOCUMENT: ErrorMeta(
         200, False, "Không đọc được chữ trên giấy tờ, hãy chụp rõ hơn và đủ sáng."
     ),
@@ -82,6 +99,12 @@ ERROR_META: dict[ErrorCode, ErrorMeta] = {
     ErrorCode.WRONG_SIDE: ErrorMeta(200, False, "Sai mặt giấy tờ, hãy chụp đúng mặt được yêu cầu."),
     ErrorCode.DOCUMENT_EXPIRED: ErrorMeta(
         200, False, "Giấy tờ đã hết hạn, hãy dùng giấy tờ còn hiệu lực."
+    ),
+    ErrorCode.WARNING_ACK_REQUIRED: ErrorMeta(
+        409, False, "Hãy xem và xác nhận cảnh báo của bản hồ sơ hiện tại."
+    ),
+    ErrorCode.VERIFICATION_ACTIVATION_BLOCKED: ErrorMeta(
+        409, False, "Cần xử lý cảnh báo về hiệu lực hoặc điều kiện giấy tờ trước khi duyệt."
     ),
     ErrorCode.FIELD_MISSING: ErrorMeta(
         200, False, "Thiếu thông tin, hãy chụp lại rõ toàn bộ giấy tờ."
@@ -117,6 +140,7 @@ ERROR_META: dict[ErrorCode, ErrorMeta] = {
     ),
     ErrorCode.RATE_LIMITED: ErrorMeta(429, True, "Quá nhiều yêu cầu, vui lòng thử lại sau."),
     ErrorCode.IMAGE_FETCH_FAILED: ErrorMeta(502, True, "Không tải được ảnh, vui lòng thử lại sau."),
+    ErrorCode.MODEL_UNAVAILABLE: ErrorMeta(503, True, "Inference assets unavailable."),
     ErrorCode.ENGINE_BUSY: ErrorMeta(503, True, "Hệ thống đang bận, vui lòng thử lại sau."),
     ErrorCode.ENGINE_TIMEOUT: ErrorMeta(504, True, "Xử lý quá thời gian, vui lòng thử lại sau."),
     ErrorCode.INTERNAL_ERROR: ErrorMeta(500, True, "Hệ thống gặp sự cố, vui lòng thử lại sau."),

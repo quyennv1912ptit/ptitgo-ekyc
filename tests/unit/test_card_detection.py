@@ -128,6 +128,17 @@ def test_all_passes_empty(settings: Settings) -> None:
     assert outcome.status is DetectionStatus.NOT_FOUND
     assert outcome.error_code is ErrorCode.CARD_NOT_FOUND
     assert outcome.passes_run == 3
+    assert outcome.failure_reason == "DETECTOR_NO_BOX"
+
+
+def test_box_without_keypoints_is_distinct_from_no_box(settings: Settings) -> None:
+    raw = result(boxes=[(100, 100, 900, 600)], confidence=[0.9])
+    raw.keypoints = None
+    outcome = detector(settings, [raw, EMPTY, EMPTY]).detect_cards(
+        np.zeros((700, 1000, 3), np.uint8)
+    )
+    assert outcome.status is DetectionStatus.NOT_FOUND
+    assert outcome.failure_reason == "KEYPOINT_INVALID_GEOMETRY"
 
 
 def test_invalid_geometry_triggers_fallback(settings: Settings) -> None:

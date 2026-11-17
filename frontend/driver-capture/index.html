@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src blob:; media-src blob:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<title>Chụp ảnh hồ sơ tài xế</title>
+<link rel="stylesheet" href="./capture.css">
+<main>
+<h1>Chụp ảnh hồ sơ tài xế</h1>
+<p>Ảnh và thông tin chỉ giữ trong tab này. Đóng hoặc tải lại trang sẽ mất dữ liệu.</p>
+<section aria-labelledby="account-title">
+<h2 id="account-title">Tài khoản demo</h2>
+<p>Chỉ dùng ảnh tổng hợp và thông tin giả.</p>
+<label>Token <input id="demo-token" type="password" autocomplete="off"></label>
+<button id="login" type="button">Đăng nhập</button>
+<button id="refresh" type="button" hidden>Làm mới hồ sơ</button>
+<p id="account-status" role="status"></p>
+<div id="applications"></div>
+<div id="application-detail"></div>
+</section>
+<div id="capture-panel">
+<nav id="steps" aria-label="Ảnh hồ sơ"></nav>
+<section aria-labelledby="title">
+<h2 id="title"></h2>
+<p id="guide"></p>
+<div id="view" class="view" hidden>
+<video playsinline muted></video><img alt="Ảnh vừa chọn" hidden><div id="frame" aria-hidden="true"></div>
+</div>
+<p id="message" role="status"></p>
+<div class="actions">
+<button id="camera" type="button">Mở camera</button>
+<button id="shot" type="button" hidden>Chụp ảnh</button>
+<button id="close" type="button" hidden>Tắt camera</button>
+<label>Chọn ảnh <input id="file" type="file" accept="image/*"></label>
+<button id="remove" type="button" hidden>Xóa ảnh</button>
+</div>
+<ul id="warnings" aria-label="Gợi ý chất lượng"></ul>
+<button id="keep" type="button" hidden>Giữ ảnh trước</button>
+<label id="ack-label" hidden><input type="checkbox" id="ack"> Tôi đã xem lại ảnh và muốn tiếp tục dù có cảnh báo.</label>
+<button id="next" type="button">Tiếp theo</button>
+</section>
+<p id="progress" role="status"></p>
+</div>
+<section id="review" aria-labelledby="review-title" hidden>
+<h2 id="review-title" tabindex="-1">Nhập thông tin giấy tờ</h2>
+<p>Nhập theo giấy tờ của bạn. Các ô có dấu * là bắt buộc.</p>
+<label><input id="extract-consent" type="checkbox"> Tôi dùng ảnh tổng hợp và đồng ý gửi ảnh tới dịch vụ QR/OCR của demo, có thể chạy trên Modal.</label>
+<button id="extract" type="button">Đọc thông tin tự động</button>
+<p id="extract-status" role="status"></p>
+<p id="consistency" role="status"></p>
+<div id="name-comparison" hidden>
+<p id="name-values"></p>
+<label><input type="checkbox" id="name-checked"> Tôi đã đối chiếu họ tên trên cả hai giấy tờ.</label>
+<button type="button" id="copy-name" disabled>Sử dụng họ tên CCCD cho GPLX</button>
+</div>
+<fieldset id="cccd-fields"><legend>CCCD / Căn cước</legend></fieldset>
+<fieldset id="gplx-fields"><legend>GPLX</legend></fieldset>
+<label><input id="no-expiry" type="checkbox"> GPLX không thời hạn</label>
+<p id="review-error" role="alert"></p>
+<button type="button" id="review-back">Quay lại ảnh</button>
+<button type="button" id="summarize">Xem tổng hợp</button>
+</section>
+<section id="summary" aria-labelledby="summary-title" hidden>
+<h2 id="summary-title" tabindex="-1">Xem lại ảnh và thông tin</h2>
+<div id="summary-photos"></div>
+<dl id="summary-fields"></dl>
+<button type="button" id="edit-info">Sửa thông tin</button>
+<label id="confirm-label"><input id="confirm" type="checkbox"> Tôi xác nhận thông tin đã nhập là chính xác.</label>
+<button type="button" id="complete" disabled>Hoàn tất kiểm tra thông tin</button>
+<p id="ready" role="status"></p>
+<label id="demo-consent-label" hidden><input id="demo-consent" type="checkbox"> Tôi xác nhận chỉ dùng dữ liệu tổng hợp và muốn nộp hồ sơ demo.</label>
+<button id="submit-application" type="button" hidden>Nộp hồ sơ</button>
+<p id="submit-status" role="status"></p>
+</section>
+</main>
+<script type="module" src="./capture.mjs"></script>
+</html>

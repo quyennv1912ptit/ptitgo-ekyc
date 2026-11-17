@@ -7,15 +7,18 @@ from ekyc.core.logging import request_id_ctx
 
 
 class RequestIdMiddleware:
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, *, trust_client_ids: bool = True) -> None:
         self.app = app
+        self.trust_client_ids = trust_client_ids
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        headers = dict(scope.get("headers", []))
-        raw = headers.get(b"x-request-id", b"").decode("latin-1")
+        raw = ""
+        if self.trust_client_ids:
+            headers = dict(scope.get("headers", []))
+            raw = headers.get(b"x-request-id", b"").decode("latin-1")
         identifier = re.sub(r"[^A-Za-z0-9_-]", "", raw)[:64] or uuid4().hex
         scope.setdefault("state", {})["request_id"] = identifier
         token = request_id_ctx.set(identifier)

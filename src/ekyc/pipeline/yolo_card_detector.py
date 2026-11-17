@@ -38,6 +38,7 @@ class DetectionOutcome:
     passes_run: int
     ignored_detections: int
     error_code: ErrorCode | None
+    failure_reason: str | None = None
 
 
 # Thứ tự pass: 0 độ, 90 độ CW, 90 độ CCW. Mỗi cặp là (góc xoay, field ngưỡng conf).
@@ -238,10 +239,17 @@ class YoloCardDetector:
         if not results:
             return []
         result = results[0]
-        if result.boxes is None or result.keypoints is None or result.keypoints.conf is None:
+        if result.boxes is None:
             return []
         boxes = result.boxes.xyxy.cpu().numpy()
         boxes_conf = result.boxes.conf.cpu().numpy()
+        if result.keypoints is None or result.keypoints.conf is None:
+            return [
+                CardDetection(
+                    np.empty((0, 2)), map_box(box, rotation, width, height), float(score), rotation
+                )
+                for box, score in zip(boxes, boxes_conf, strict=True)
+            ]
         points = result.keypoints.xy.cpu().numpy()
         keypoint_conf = result.keypoints.conf.cpu().numpy()
         detections = []
@@ -261,10 +269,12 @@ class YoloCardDetector:
 
     def detect_cards(self, image: np.ndarray) -> DetectionOutcome:
         passes_run = 0
+        saw_box = False
         for rotation, threshold_field in ROTATION_PASSES:
             passes_run += 1
             threshold = getattr(self.settings, threshold_field)
             raw = self.predict_pass(image, rotation, threshold)
+            saw_box |= bool(raw)
             valid = [
                 detection
                 for detection in raw
@@ -286,7 +296,13 @@ class YoloCardDetector:
                 DetectionStatus.DETECTED, best, rotation, passes_run, ignored, None
             )
         return DetectionOutcome(
-            DetectionStatus.NOT_FOUND, None, 0, passes_run, 0, ErrorCode.CARD_NOT_FOUND
+            DetectionStatus.NOT_FOUND,
+            None,
+            0,
+            passes_run,
+            0,
+            ErrorCode.CARD_NOT_FOUND,
+            "KEYPOINT_INVALID_GEOMETRY" if saw_box else "DETECTOR_NO_BOX",
         )
 
     def detect(self, image: np.ndarray) -> CardDetectionResult:

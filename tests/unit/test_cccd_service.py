@@ -156,12 +156,11 @@ def test_warnings(service: CccdService) -> None:
     assert any(w.code == WarningCode.ID_STRUCTURE_MISMATCH for w in result.warnings)
 
 
-def test_low_resolution_warning_marks_review(service: CccdService) -> None:
-    service.preparer.warnings = (
-        Warning(code=WarningCode.LOW_RESOLUTION, message="Độ phân giải ảnh thấp."),
-    )
+@pytest.mark.parametrize("code", [WarningCode.LOW_RESOLUTION, WarningCode.CARD_GEOMETRY_UNCERTAIN])
+def test_image_warning_marks_review(service: CccdService, code: WarningCode) -> None:
+    service.preparer.warnings = (Warning(code=code, message="Cần kiểm tra ảnh."),)
     result = service.run("front", "back", today=TODAY)
-    assert any(w.code == WarningCode.LOW_RESOLUTION for w in result.warnings)
+    assert any(w.code == code for w in result.warnings)
     assert result.data.review_required
     assert result.data.review_fields == [
         "idNumber",

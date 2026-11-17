@@ -3,7 +3,7 @@ import secrets
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ekyc.services.cccd_service import CccdService
+    from ekyc.services.cccd_worker import CccdWorker
 
 from fastapi import Header, Request
 
@@ -18,13 +18,11 @@ def verify_api_key(request: Request, x_api_key: str | None = Header(default=None
         raise EkycError(ErrorCode.UNAUTHORIZED)
 
 
-def get_cccd_service(request: Request) -> "CccdService":
-    from ekyc.services.cccd_service import CccdService
-
-    state = request.app.state
-    if state.ocr_engine is None:
+def get_cccd_service(request: Request) -> "CccdWorker":
+    worker = request.app.state.cccd_worker
+    if worker is None:
+        if getattr(request.app.state, "inference_readiness_error", None):
+            raise EkycError(ErrorCode.MODEL_UNAVAILABLE)
         logging.getLogger(__name__).error("ocr_engine_unavailable")
         raise EkycError(ErrorCode.INTERNAL_ERROR)
-    return CccdService(
-        state.settings, state.card_preparer, state.ocr_engine, state.doc_classifier, state.job_slots
-    )
+    return worker

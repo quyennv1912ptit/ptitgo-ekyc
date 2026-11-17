@@ -99,13 +99,8 @@ def test_success_envelope(client: TestClient) -> None:
 
 def test_lifespan(app: FastAPI, client: TestClient, settings: Settings) -> None:
     assert app.state.settings is settings
-    from ekyc.pipeline.doc_classifier import DocClassifier
-
-    assert isinstance(app.state.doc_classifier, DocClassifier)
-    assert app.state.ocr_engine is None
+    assert app.state.cccd_worker is None
     assert app.state.face_engine is None
-    assert app.state.job_slots.acquire(blocking=False)
-    app.state.job_slots.release()
 
 
 def test_prod_docs(settings: Settings) -> None:
@@ -114,3 +109,10 @@ def test_prod_docs(settings: Settings) -> None:
     with TestClient(create_app(settings.model_copy(update={"env": "prod"}))) as client:
         for path in ("/docs", "/redoc", "/openapi.json"):
             assert client.get(path).status_code == 404
+
+
+def test_health_readiness_with_inference_disabled(client):
+    assert client.get("/health").status_code == 200
+    response = client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable", "worker": "disabled"}

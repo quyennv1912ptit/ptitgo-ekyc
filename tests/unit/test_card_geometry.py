@@ -11,6 +11,7 @@ from ekyc.pipeline.geometry import (
     GateStatus,
     card_native_geometry,
     evaluate_card_gate,
+    experimental_geometry_warnings,
 )
 
 
@@ -18,6 +19,73 @@ def quad(width: float, height: float, x: float = 100, y: float = 100) -> np.ndar
     return np.array(
         [[x, y], [x + width, y], [x + width, y + height], [x, y + height]], dtype=np.float32
     )
+
+
+@pytest.mark.parametrize(
+    ("points", "review"),
+    [
+        ([[100, 100], [1100, 100], [1100, 700], [100, 700]], False),
+        ([[100, 100], [1100, 100], [1000, 700], [190, 700]], False),
+        ([[100, 100], [1100, 100], [850, 400], [100, 400]], True),
+        ([[100, 100], [1100, 100], [950, 700], [250, 700]], True),
+    ],
+)
+def test_geometry_review_is_opt_in_and_cyclic(settings, points, review):
+    points = np.asarray(points, np.float32)
+    assert experimental_geometry_warnings(points, settings) == ()
+    enabled = settings.model_copy(update={"card_experimental_geometry_review": True})
+    for shift in range(4):
+        warnings = experimental_geometry_warnings(np.roll(points, shift, axis=0), enabled)
+        assert bool(warnings) is review
+        if warnings:
+            assert warnings[0].code is WarningCode.CARD_GEOMETRY_UNCERTAIN
+
+
+@pytest.mark.parametrize(
+    "failure", [None, ErrorCode.CARD_CROPPED, ErrorCode.IMAGE_TOO_SMALL, ErrorCode.IMAGE_BLURRY]
+)
+def test_geometry_review_precedence(settings, monkeypatch, failure):
+    config = settings.model_copy(
+        update={
+            "card_experimental_geometry_review": True,
+            "card_detector_backend": "opencv",
+        }
+    )
+    image = np.zeros((900, 1500, 3), np.uint8)
+    points = np.array([[100, 100], [1300, 100], [1020, 700], [270, 700]], np.float32)
+    if failure is ErrorCode.CARD_CROPPED:
+        points[0, 0] = 0
+    if failure is ErrorCode.IMAGE_TOO_SMALL:
+        points /= 4
+    preparer = DefaultCardPreparer(config)
+    preparer.detector = SimpleNamespace(
+        detect=lambda _: SimpleNamespace(
+            corners=points,
+            warped_image=image,
+        )
+    )
+    monkeypatch.setattr(
+        "ekyc.pipeline.image_loader.load_image_from_url_sync",
+        lambda *_: SimpleNamespace(bgr=image, width=1500, height=900),
+    )
+
+    def finish(crop):
+        if failure is ErrorCode.IMAGE_BLURRY:
+            raise EkycError(failure)
+        return crop
+
+    monkeypatch.setattr(preparer, "finish", finish)
+    if failure is not None:
+        with pytest.raises(EkycError) as error:
+            preparer.prepare("unused")
+        assert error.value.code is failure
+    else:
+        result = preparer.prepare("unused")
+        assert result.image is image
+        assert {warning.code for warning in result.warnings} == {
+            WarningCode.CARD_GEOMETRY_UNCERTAIN,
+            WarningCode.LOW_RESOLUTION,
+        }
 
 
 def rotated_quad(width: float, height: float, angle_deg: float, center=(900, 900)) -> np.ndarray:

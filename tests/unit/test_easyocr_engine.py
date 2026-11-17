@@ -65,19 +65,19 @@ def test_app_easyocr_lifespan(settings: Settings, monkeypatch: pytest.MonkeyPatc
 
     calls = []
 
-    class FakeEngine:
-        def __init__(self, languages: list[str], *, width_ths: float | None = None) -> None:
-            assert languages == ["vi", "en"]
+    class FakeWorker:
+        def __init__(self, settings: Settings) -> None:
+            assert settings.ocr_backend == "easyocr"
             calls.append("init")
 
-        def warm_up(self) -> None:
-            calls.append("warm_up")
+        def close(self) -> None:
+            calls.append("close")
 
-    monkeypatch.setattr("ekyc.pipeline.ocr.easyocr_engine.EasyOcrEngine", FakeEngine)
+    monkeypatch.setattr("ekyc.main.CccdWorker", FakeWorker)
     with TestClient(create_app(settings.model_copy(update={"ocr_backend": "easyocr"}))) as client:
         assert client.get("/health").status_code == 200
-        assert isinstance(client.app.state.ocr_engine, FakeEngine)
-    assert calls == ["init", "warm_up"]
+        assert isinstance(client.app.state.cccd_worker, FakeWorker)
+    assert calls == ["init", "close"]
 
 
 @pytest.mark.parametrize("width", [None, 0.2])

@@ -58,6 +58,27 @@ def any_corner_outside(quad: np.ndarray, image_w: int, image_h: int) -> bool:
     )
 
 
+def experimental_geometry_warnings(quad: np.ndarray, settings: Settings) -> tuple[Warning, ...]:
+    """Flag unusual pose geometry for review using the prior offline candidate limits."""
+    if not settings.card_experimental_geometry_review:
+        return ()
+    ordered = _cyclic_order(np.asarray(quad, dtype=np.float64))
+    edges = np.roll(ordered, -1, axis=0) - ordered
+    lengths = np.linalg.norm(edges, axis=1)
+    if np.isfinite(lengths).all() and np.all(lengths > 0):
+        units = edges / lengths[:, None]
+        cosine = -np.sum(units * np.roll(units, 1, axis=0), axis=1)
+        ratios = lengths[:2] / lengths[2:]
+        if np.all(np.abs(cosine) <= 0.5 + 1e-12) and np.all(np.maximum(ratios, 1 / ratios) <= 1.25):
+            return ()
+    return (
+        Warning(
+            code=WarningCode.CARD_GEOMETRY_UNCERTAIN,
+            message="Hình dạng vùng thẻ bất thường. Cần kiểm tra thủ công trước khi xác nhận.",
+        ),
+    )
+
+
 def card_native_geometry(quad: np.ndarray, image_w: int, image_h: int) -> CardGeometry:
     """Đo cạnh dài/ngắn bằng trung bình hai cạnh đối diện, đúng cho thẻ dọc và thẻ xoay."""
     points = np.asarray(quad, dtype=np.float64).reshape(4, 2)

@@ -1,4 +1,5 @@
 import io
+import socket
 
 import httpx
 import numpy as np
@@ -15,6 +16,15 @@ from ekyc.pipeline.image_loader import (
     load_image_from_url_sync,
     validate_image_url,
 )
+
+
+@pytest.fixture(autouse=True)
+def dns(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kw: dns_answer("8.8.8.8"))
+
+
+def dns_answer(address):
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))]
 
 
 @pytest.fixture
@@ -196,3 +206,63 @@ def test_load_image_from_bytes(settings: Settings) -> None:
     with pytest.raises(EkycError) as exc_info:
         load_image_from_bytes(b"x" * 2000, settings)
     assert exc_info.value.code == ErrorCode.IMAGE_TOO_LARGE
+
+
+@pytest.mark.parametrize("location", ["https://outside.example/image", "http://127.0.0.1/photo"])
+def test_redirect_never_contacted(settings, location):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(302, headers={"location": location})
+
+    with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
+        with pytest.raises(EkycError) as info:
+            fetch_image_bytes_sync("https://res.cloudinary.com/photo", settings, client)
+    assert info.value.code == ErrorCode.URL_NOT_ALLOWED
+    assert len(calls) == 1
+    assert calls[0].url.host == "8.8.8.8"
+    assert calls[0].headers["host"] == "res.cloudinary.com"
+    assert calls[0].extensions["sni_hostname"] == "res.cloudinary.com"
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "169.254.169.254", "10.0.0.1", "::1", "fd00::1"])
+def test_rejects_mixed_dns_answers_before_transport(settings, monkeypatch, address):
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda *args, **kw: dns_answer("8.8.8.8") + dns_answer(address)
+    )
+    transport = httpx.MockTransport(lambda request: pytest.fail("network call"))
+    with httpx.Client(transport=transport) as c:
+        with pytest.raises(EkycError) as info:
+            fetch_image_bytes_sync("https://res.cloudinary.com/photo", settings, c)
+    assert info.value.code == ErrorCode.URL_NOT_ALLOWED
+
+
+def test_pixel_limit_before_decode(settings, monkeypatch):
+    data = create_test_image(200, 100)
+    monkeypatch.setattr("PIL.JpegImagePlugin.JpegImageFile.load", lambda *a: pytest.fail("decoded"))
+    with pytest.raises(EkycError) as info:
+        load_image_from_bytes(data, settings)
+    assert info.value.code == ErrorCode.IMAGE_TOO_LARGE
+
+
+def test_fake_extension(settings):
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "image/jpeg"}, content=b"text"
+            )
+        )
+    ) as client:
+        with pytest.raises(EkycError) as info:
+            load_image_from_url_sync("https://res.cloudinary.com/fake.jpg", settings, client)
+    assert info.value.code == ErrorCode.INVALID_IMAGE
+
+
+def test_animated_png_rejected(settings):
+    buffer = io.BytesIO()
+    frame = Image.new("RGB", (8, 8))
+    frame.save(buffer, format="PNG", save_all=True, append_images=[Image.new("RGB", (8, 8), "red")])
+    with pytest.raises(EkycError) as info:
+        load_image_from_bytes(buffer.getvalue(), settings)
+    assert info.value.code == ErrorCode.INVALID_IMAGE
