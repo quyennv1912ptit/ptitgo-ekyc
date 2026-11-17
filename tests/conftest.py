@@ -1,4 +1,8 @@
+import os
 from collections.abc import Iterator
+
+# Provide a synthetic fallback key before test collection imports ekyc.main without a .env file.
+os.environ.setdefault("EKYC_API_KEY", "test-key")
 
 import pytest
 from fastapi import APIRouter, FastAPI, Request
