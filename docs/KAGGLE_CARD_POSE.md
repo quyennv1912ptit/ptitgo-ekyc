@@ -2,8 +2,8 @@
 
 Đã chuẩn bị:
 
-- Notebook: `F:/ekyc-service/notebooks/train_card_pose_kaggle.ipynb`.
-- ZIP để upload: `F:/ekyc-service/tests/fixtures/private/card_pose_kaggle.zip`.
+- Notebook: `<repo-root>/notebooks/train_card_pose_kaggle.ipynb`.
+- ZIP để upload: `<local-private-dir>/card_pose_kaggle.zip`.
 - Gói gồm 37 ảnh train + 16 ảnh validation, nhãn 4 góc, code train tối thiểu và model seed hiện tại.
   Không chứa `.env`, khóa API, OCR/parser, toàn bộ service hay lockfile.
 
@@ -84,19 +84,19 @@ Tắt session GPU khi hoàn tất.
 
 ## 5. Dùng model trên Windows
 
-Giải nén ZIP vào `F:/ekyc-service/models/kaggle/`, giữ model local cũ để so sánh.
-Trong PowerShell tại `F:/ekyc-service`:
+Giải nén ZIP vào `<repo-root>/models/kaggle/`, giữ model local cũ để so sánh.
+Trong PowerShell tại `<repo-root>`:
 
 ```powershell
 $env:CARD_DETECTOR_BACKEND="yolo"
-$env:CARD_YOLO_MODEL_PATH="F:/ekyc-service/models/kaggle/card_yolov8n_pose.kaggle.pt"
+$env:CARD_YOLO_MODEL_PATH="<repo-root>/models/kaggle/card_yolov8n_pose.kaggle.pt"
 $env:QUALITY_PROFILE="evaluation"
 
-uv run python scripts/evaluate_card_preparer.py tests/fixtures/private/card_pose_dataset/annotations.json --model models/kaggle/card_yolov8n_pose.kaggle.pt --output tests/fixtures/private/card_pose_dataset/kaggle_eval
+uv run python scripts/evaluate_card_preparer.py <local-private-dir>/card_pose_dataset/annotations.json --model models/kaggle/card_yolov8n_pose.kaggle.pt --output <local-private-dir>/card_pose_dataset/kaggle_eval
 ```
 
 Xem `results.json`, `summary.json`, các file `*_overlay.jpg` và `*_crop.jpg` ở
-`F:/ekyc-service/tests/fixtures/private/card_pose_dataset/kaggle_eval/`.
+`<local-private-dir>/card_pose_dataset/kaggle_eval/`.
 So sánh với model local: 48/55 qua hình học, 43/55 qua profile evaluation;
 đồng thời xem mất chữ, lệch góc và giữ thừa nền, không chỉ đếm ảnh qua gate.
 
@@ -112,11 +112,11 @@ profile evaluation chỉ dành cho thử nghiệm, không dùng với `ENV=prod`
 
 ## 6. Đóng gói lại sau khi sửa nhãn/thêm ảnh
 
-Rà nhãn trong `F:/ekyc-service/tests/fixtures/private/card_pose_dataset/export/annotation_review/`.
+Rà nhãn trong `<local-private-dir>/card_pose_dataset/export/annotation_review/`.
 Với dataset export mới, tạo gói mới (script không ghi đè ZIP đã có):
 
 ```powershell
-uv run python scripts/package_card_pose_kaggle.py --dataset tests/fixtures/private/card_pose_dataset/export_v2 --output tests/fixtures/private/kaggle_v2/card_pose_kaggle.zip
+uv run python scripts/package_card_pose_kaggle.py --dataset <local-private-dir>/card_pose_dataset/export_v2 --output <local-private-dir>/kaggle_v2/card_pose_kaggle.zip
 ```
 
 Cập nhật dataset Kaggle, gắn đúng phiên bản vào notebook và train lại. Nếu đã thêm ảnh/đổi

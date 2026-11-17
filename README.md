@@ -4,6 +4,12 @@ Python 3.11, FastAPI, pydantic-settings. Có `GET /health` công khai và `POST 
 
 ## Chạy
 
+Dùng Python 3.11 và uv với `uv.lock`. `uv sync --locked` tạo virtual environment `.venv` và cài các nhóm phát triển hiện có. Bản Docker staging cài nhóm `inference` trên CPU Linux. Dùng `uv run --locked pytest -q` và `uv run --locked ruff check .` để kiểm tra local.
+
+Để chạy OCR đầy đủ, lấy checkpoint YOLO và cache EasyOCR từ nguồn artifact đã được nhóm phê duyệt. Đối chiếu tên, SHA-256 và cách mount trong [hướng dẫn staging](docs/phase10-9-deployment-readiness.md) hoặc [hướng dẫn deploy Modal CI/CD và rollback](docs/modal-ekyc-staging.md). Nếu bật đối chiếu mặt, chuẩn bị ONNX YuNet/SFace và manifest theo [hướng dẫn face comparison](docs/phase10-8-face-comparison.md). Kiểm tra `/health` cho liveness và `/health/ready` cho readiness. Khi thiếu model, kiểm tra các đường dẫn, manifest và checksum trước khi thử warm-up lại.
+
+Giữ `.env`, SQLite, ảnh upload, dataset, cache model và báo cáo có dữ liệu định danh trong storage local hoặc nội bộ được kiểm soát. Dùng ảnh tổng hợp cho test và smoke. Các route OCR/face nội bộ nhận `X-API-Key` từ backend. Workflow hồ sơ độc lập có thể dùng Firebase và đồng bộ kết quả qua khóa riêng khi được cấu hình.
+
 ```powershell
 uv sync --frozen
 # Chỉ khi chưa có .env:
@@ -220,15 +226,15 @@ không sửa chính tả/địa danh, không đổi schema response ngoài cản
 
 ## Detector YOLO 4 góc và quality gate sau crop
 
-Chi tiết dữ liệu train, đánh giá và giới hạn xem
-[hướng dẫn detector](reports/card_detector_2026-11-10/README.md).
+Xem phần chuẩn bị checkpoint trong [hướng dẫn staging](docs/phase10-9-deployment-readiness.md).
+Báo cáo đánh giá chi tiết được lưu cục bộ trên máy có dữ liệu nghiên cứu (không đưa vào Git).
 Muốn train GPU trên Kaggle và tải trọng số về: [hướng dẫn Kaggle](docs/KAGGLE_CARD_POSE.md),
 notebook `notebooks/train_card_pose_kaggle.ipynb`.
 
 Đối chiếu JSON 4 góc với YOLO trên thư mục ảnh mặt trước:
 
 ```powershell
-uv run python scripts/compare_front_annotations.py tests/data/cccd_front --model models/card_yolov8n_pose.selected.pt --output tests/fixtures/private/front_comparison_new
+uv run python scripts/compare_front_annotations.py tests/data/cccd_front --model models/card_yolov8n_pose.selected.pt --output <local-private-dir>/front_comparison_new
 ```
 
 Tool lưu crop PNG, overlay (JSON xanh / YOLO đỏ), OCR và parser/debug theo mã Fxx.
@@ -249,7 +255,11 @@ uv run python scripts/try_ocr.py tests/data/cccd_front.jpg --side front --warp
 uv run uvicorn ekyc.main:app --reload --port 8001
 ```
 
-`try_card_preparer.py` lưu crop/overlay/quality tại `tests/fixtures/private/card_preview/`,
+`<local-private-dir>/card_preview/` là thư mục đầu ra cục bộ gợi ý (bỏ qua trong Git),
 không chạy OCR. Dùng crop này để kiểm tra mất chữ/thừa nền trước khi đánh giá parser.
 Profile evaluation không dùng trong production; trả về cấu hình thường bằng cách xóa
 ba biến môi trường trên hoặc mở một phiên PowerShell mới.
+
+## Bản quyền
+
+Dự án sử dụng giấy phép **GNU Affero General Public License v3.0 (AGPL-3.0)** ([LICENSE](LICENSE)). Xem thêm danh sách giấy phép bên thứ ba và phạm vi model/dataset tại [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
