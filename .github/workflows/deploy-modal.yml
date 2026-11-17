@@ -1,0 +1,169 @@
+name: Deploy eKYC to Modal
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target deployment environment (staging only until Modal production is provisioned)
+        type: choice
+        options:
+          - staging
+        default: staging
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: ekyc-modal-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Enforce staging-only deployment policy
+        if: inputs.environment != 'staging'
+        run: |
+          echo "::error::Only 'staging' deployments are permitted until a separate Modal production environment is provisioned."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+          python-version: "3.11"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Verify lockfile and install dependencies
+        run: |
+          uv lock --check
+          uv sync --locked
+
+      - name: Run Python lint, tests, and JavaScript tests
+        run: |
+          uv run --locked ruff check .
+          uv run --locked pytest -q
+          node --test frontend/driver-capture/*.test.mjs
+
+      - name: Audit runtime dependencies
+        run: uv audit --locked --no-group training --no-group benchmark --no-group dev
+
+      - name: Verify Modal entrypoint and model manifest
+        env:
+          MODAL_MODEL_SOURCE: volume
+          MODAL_APP_ENV: ${{ inputs.environment == 'production' && 'prod' || 'staging' }}
+        run: |
+          uv run --locked --with modal==1.6.4 python scripts/modal_pre_deploy_check.py --offline
+
+  deploy:
+    needs: quality-gates
+    if: inputs.environment == 'staging'
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+          python-version: "3.11"
+
+      - name: Install locked core runtime for deploy tooling
+        run: uv sync --locked --no-default-groups
+
+      - name: Verify Modal entrypoint offline
+        env:
+          MODAL_MODEL_SOURCE: volume
+          MODAL_APP_ENV: ${{ inputs.environment == 'production' && 'prod' || 'staging' }}
+          MODAL_MODEL_VOLUME_NAME: ${{ vars.MODAL_MODEL_VOLUME_NAME || 'ekyc-models' }}
+          MODAL_SECRET_NAME: ${{ vars.MODAL_SECRET_NAME || 'ekyc-extraction-staging' }}
+          MODAL_EXTRA_SECRETS: ${{ vars.MODAL_EXTRA_SECRETS || '' }}
+        run: |
+          uv run --locked --no-default-groups --with modal==1.6.4 \
+            python scripts/modal_pre_deploy_check.py --offline
+
+      - name: Deploy to Modal
+        id: modal_deploy
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          MODAL_MODEL_SOURCE: volume
+          MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || (inputs.environment == 'production' && 'production' || 'main') }}
+          MODAL_APP_ENV: ${{ inputs.environment == 'production' && 'prod' || 'staging' }}
+          MODAL_APP_NAME: ${{ vars.MODAL_APP_NAME || 'ekyc-extraction-staging' }}
+          MODAL_MODEL_VOLUME_NAME: ${{ vars.MODAL_MODEL_VOLUME_NAME || 'ekyc-models' }}
+          MODAL_SECRET_NAME: ${{ vars.MODAL_SECRET_NAME || 'ekyc-extraction-staging' }}
+          MODAL_EXTRA_SECRETS: ${{ vars.MODAL_EXTRA_SECRETS || '' }}
+          GIT_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${MODAL_TOKEN_ID:-}" || -z "${MODAL_TOKEN_SECRET:-}" ]]; then
+            echo "::error::MODAL_TOKEN_ID and MODAL_TOKEN_SECRET must be set in environment '${{ inputs.environment }}'."
+            exit 1
+          fi
+          DEPLOY_TAG="sha-${GITHUB_SHA:0:12}"
+          export MODAL_DEPLOY_TAG="$DEPLOY_TAG"
+
+          uv run --locked --no-default-groups --with modal==1.6.4 \
+            python scripts/modal_pre_deploy_check.py --offline --check-volume --expected-app "$MODAL_APP_NAME"
+
+          uv run --locked --no-default-groups --with modal==1.6.4 \
+            python -m modal deploy -e "$MODAL_ENVIRONMENT" --tag "$DEPLOY_TAG" scripts/modal_ekyc.py
+
+          ENDPOINT_URL=$(uv run --locked --no-default-groups --with modal==1.6.4 python -c '
+          import os, modal
+          fn = modal.Function.from_name(
+              os.environ["MODAL_APP_NAME"],
+              "cccd_api",
+              environment_name=os.environ["MODAL_ENVIRONMENT"],
+          )
+          url = fn.get_web_url()
+          if not url:
+              raise SystemExit("Could not resolve Modal endpoint URL")
+          print(url)
+          ')
+
+          DEPLOY_VERSION=$(uv run --locked --no-default-groups --with modal==1.6.4 \
+            python -m modal app history "$MODAL_APP_NAME" -e "$MODAL_ENVIRONMENT" --json | python -c '
+          import json, sys
+          rows = json.load(sys.stdin)
+          print(rows[0].get("Version", "unknown") if rows else "unknown")
+          ')
+
+          echo "endpoint_url=$ENDPOINT_URL" >> "$GITHUB_OUTPUT"
+          echo "deploy_tag=$DEPLOY_TAG" >> "$GITHUB_OUTPUT"
+          echo "deploy_version=$DEPLOY_VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Modal Deployment"
+            echo "- Environment: \`${{ inputs.environment }}\` (Modal env: \`$MODAL_ENVIRONMENT\`)"
+            echo "- App: \`$MODAL_APP_NAME\`"
+            echo "- Version: \`$DEPLOY_VERSION\`"
+            echo "- Tag: \`$DEPLOY_TAG\`"
+            echo "- Commit SHA: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post-deploy verification
+        env:
+          MODAL_PROXY_KEY: ${{ secrets.MODAL_PROXY_KEY }}
+          MODAL_PROXY_SECRET: ${{ secrets.MODAL_PROXY_SECRET }}
+          EKYC_SMOKE_API_KEY: ${{ secrets.EKYC_SMOKE_API_KEY }}
+        run: |
+          set -euo pipefail
+          uv run --locked --no-default-groups python scripts/modal_post_deploy_verify.py \
+            --origin "${{ steps.modal_deploy.outputs.endpoint_url }}" \
+            --expected-sha "${{ github.sha }}" \
+            --expected-version "${{ steps.modal_deploy.outputs.deploy_tag }}"

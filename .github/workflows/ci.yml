@@ -1,0 +1,62 @@
+name: eKYC CI
+on: [push, pull_request]
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+          python-version: "3.11"
+      - run: uv lock --check
+      - run: uv sync --locked
+      - run: uv run --locked ruff check .
+      - run: uv run --locked pytest -q
+      - run: node --test frontend/driver-capture/*.test.mjs
+      - run: uv audit --locked --no-group training --no-group benchmark --no-group dev
+
+  staging-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build --tag ekyc:ci .
+      - name: Check installed inference dependencies, image contents and non-root UID
+        run: |
+          docker run --rm --network none --entrypoint python ekyc:ci \
+            -m ekyc.services.model_artifacts --packages-only
+          docker run --rm --network none --entrypoint python ekyc:ci -c \
+            'import os; from pathlib import Path; assert os.geteuid() == 10001; assert {p.name for p in Path("/app").iterdir()} == {".venv"}'
+      - name: Check staging liveness and fail-closed readiness without artifacts
+        shell: bash
+        run: |
+          export EKYC_API_KEY="$(openssl rand -hex 32)"
+          docker run -d --name ekyc-ci --network none --read-only --tmpfs /tmp \
+            -e EKYC_API_KEY -e ENV=staging -e OCR_BACKEND=easyocr ekyc:ci
+          trap 'docker rm -f ekyc-ci >/dev/null' EXIT
+          for attempt in {1..30}; do
+            if docker exec ekyc-ci python -c \
+              "import urllib.request as u; assert u.urlopen('http://127.0.0.1:8001/health', timeout=2).status == 200"; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec -i ekyc-ci python - <<'PY'
+          import json
+          from urllib.error import HTTPError
+          from urllib.request import urlopen
+          try:
+              urlopen("http://127.0.0.1:8001/health/ready", timeout=2)
+          except HTTPError as exc:
+              assert exc.code == 503
+              assert json.load(exc)["code"] == "MODEL_FILE_MISSING"
+          else:
+              raise AssertionError("staging reported ready without models")
+          PY
