@@ -8,25 +8,17 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.6",
-    "torchvision>=0.21",
-    "deepface>=0.0.104",
-    "easyocr>=1.7.2",
     "fastapi[standard]>=0.162.2",
     "httpx>=0.28.1",
     "numpy>=2.4.6",
-    "opencv-python-headless>=5.0.0.93",
+    "opencv-python-headless==5.0.0.93",
     "pillow>=13.0.0",
     "pydantic-settings>=2.16.2",
     "rapidfuzz>=3.14.6",
-    "tf-keras>=2.21.0",
     "unidecode>=1.4.0",
     "tzdata>=2026.6",
-    "ultralytics>=8.3,<9",
-    "huggingface-hub>=2.4.0",
-    "albumentations>=2.0.8",
-    "opencv-python>=5.0.0.93",
-    "scikit-learn>=1.9.1",
+    "firebase-admin>=7.8.0",
+    "cryptography>=50.0.2",
 ]
 
 [build-system]
@@ -42,7 +34,30 @@ explicit = true
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
+[tool.uv]
+# Preserve the existing local scripts' dependencies when running plain uv run.
+default-groups = ["dev", "inference", "training", "benchmark"]
+
 [dependency-groups]
+inference = [
+    "torch==2.15.0",
+    "torchvision==0.29.2",
+    "easyocr==1.7.2",
+    "ultralytics-opencv-headless==8.4.208",
+    "psutil>=7.2.2",
+]
+# YuNet/SFace use OpenCV already in core and the existing inference worker.
+face = [{ include-group = "inference" }]
+training = [
+    { include-group = "inference" },
+    "huggingface-hub>=2.4.0",
+    "albumentations>=2.0.8",
+    "scikit-learn>=1.9.1",
+]
+benchmark = [
+    { include-group = "inference" },
+    "onnxruntime>=1.20",
+]
 dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.4",

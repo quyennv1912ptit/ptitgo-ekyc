@@ -1,0 +1,43 @@
+services:
+  ekyc:
+    build: .
+    env_file: ${EKYC_ENV_FILE:-.env.staging}
+    environment:
+      ENV: staging
+      OCR_BACKEND: easyocr
+      INFERENCE_WARM_UP: "true"
+      CARD_DETECTOR_BACKEND: yolo
+      CARD_YOLO_MODEL_PATH: /opt/ekyc/models/card_pose_v3_best.pt
+      EASYOCR_MODEL_DIR: /opt/ekyc/ocr
+    volumes:
+      - type: bind
+        source: ${EKYC_YOLO_FILE:?set EKYC_YOLO_FILE}
+        target: /opt/ekyc/models/card_pose_v3_best.pt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${EKYC_OCR_DIR:?set EKYC_OCR_DIR}
+        target: /opt/ekyc/ocr
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "127.0.0.1:${EKYC_STAGING_PORT:-8001}:8001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cpus: 4
+    mem_limit: 8g
+    pids_limit: 256
+    stop_grace_period: 45s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
