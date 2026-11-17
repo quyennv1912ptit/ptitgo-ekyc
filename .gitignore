@@ -39,12 +39,19 @@ tests/fixtures/real/
 !/pyproject.toml
 !/uv.lock
 !/README.md
+!/LICENSE
+!/THIRD_PARTY_NOTICES.md
 !/Dockerfile
+!/.dockerignore
+!/.github/
+!/compose.yaml
+!/.env.staging.example
 !/src/
 !/scripts/
 !/tests/
 !/notebooks/
 !/docs/
+!/frontend/
 
 # ===== Trong các thư mục được mở: vẫn chặn dữ liệu và file lớn =====
 /tests/data/
@@ -62,3 +69,22 @@ __pycache__/
 *.xlsx
 *.csv
 .env
+.gitignore.bak
+
+# ===== Giữ local các script debug/annotation nghiên cứu, báo cáo audit nội bộ và test gắn script nghiên cứu =====
+/scripts/gplx_*.py
+/scripts/evaluate_gplx_phase10_7.py
+/scripts/select_pose_dev.py
+/docs/gplx-*.md
+/docs/phase10-10-acceptance-report.md
+/docs/driver-verification-*.md
+/tests/unit/test_gplx_detector_benchmark.py
+/tests/unit/test_gplx_exploratory_evaluation.py
+/tests/unit/test_gplx_hybrid_ocr.py
+/tests/unit/test_gplx_independent_validation.py
+/tests/unit/test_gplx_phase6_probe.py
+/tests/unit/test_gplx_pixel_regions.py
+/tests/unit/test_gplx_recognizer_benchmark.py
+/tests/unit/test_gplx_region_recovery.py
+/tests/unit/test_gplx_reliability_audit.py
+/tests/unit/test_gplx_text_annotation.py
