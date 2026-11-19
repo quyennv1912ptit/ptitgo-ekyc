@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     verification_db_path: Path | None = None
     verification_storage_dir: Path | None = None
     verification_storage_key: SecretStr | None = None
+    verification_lookup_hmac_key: SecretStr | None = None
     verification_uploads_per_minute: int = Field(default=12, ge=1)
     verification_parallel_uploads: int = Field(default=2, ge=1, le=16)
     verification_upload_timeout_s: float = Field(default=30, gt=0)

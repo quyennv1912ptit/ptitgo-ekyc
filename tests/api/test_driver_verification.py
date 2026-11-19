@@ -175,7 +175,8 @@ def test_submit_review_and_resubmit_keep_snapshots(verification, final_status):
 
     assert not submit(0, "premature").json()["success"]
     assert decision(0, "UNDER_REVIEW").status_code == 404
-    for revision, slot in enumerate(("cccd_front", "cccd_back", "gplx_front", "selfie")):
+    all_slots = ("cccd_front", "cccd_back", "gplx_front", "gplx_back", "selfie")
+    for revision, slot in enumerate(all_slots):
         assert upload(slot, revision, "white").status_code == 200
 
     class FakeWorker:
@@ -184,60 +185,60 @@ def test_submit_review_and_resubmit_keep_snapshots(verification, final_status):
             return ExtractionResult(slot=slot, ocr_status="OCR_NO_FIELDS")
 
     client.app.state.cccd_worker = FakeWorker()
-    result = client.post(path + "/extract/cccd_front", headers=driver, json={"revision": 4})
+    result = client.post(path + "/extract/cccd_front", headers=driver, json={"revision": 5})
     client.app.state.cccd_worker = None
     assert result.json()["data"]["proposal"]["ocrStatus"] == "OCR_NO_FIELDS"
 
-    assert confirm(5, DETAILS).json()["success"]
-    assert submit(6, "without-ack", ack=False).json()["errorCode"] == "WARNING_ACK_REQUIRED"
+    assert confirm(6, DETAILS).json()["success"]
+    assert submit(7, "without-ack", ack=False).json()["errorCode"] == "WARNING_ACK_REQUIRED"
     stale = client.post(
         path + "/submit",
         headers={**driver, "Idempotency-Key": "stale-ack"},
-        json={"revision": 6, "warningAcknowledgementRevision": 5},
+        json={"revision": 7, "warningAcknowledgementRevision": 6},
     )
     assert stale.json()["errorCode"] == "WARNING_ACK_REQUIRED"
-    first = submit(6, "submit-one")
+    first = submit(7, "submit-one")
     assert first.json()["data"]["status"] == "SUBMITTED"
-    assert submit(6, "submit-one").json()["data"] == first.json()["data"]
-    assert submit(7, "submit-one").json()["errorCode"] == "IDEMPOTENCY_CONFLICT"
-    assert decision(7, "UNDER_REVIEW", driver).status_code == 403
-    assert decision(7, "APPROVED").json()["errorCode"] == "INVALID_TRANSITION"
-    assert decision(7, "UNDER_REVIEW").json()["data"]["revision"] == 8
-    assert decision(7, "APPROVED").json()["errorCode"] == "REVISION_CONFLICT"
-    assert confirm(8, DETAILS).json()["errorCode"] == "INVALID_TRANSITION"
+    assert submit(7, "submit-one").json()["data"] == first.json()["data"]
+    assert submit(8, "submit-one").json()["errorCode"] == "IDEMPOTENCY_CONFLICT"
+    assert decision(8, "UNDER_REVIEW", driver).status_code == 403
+    assert decision(8, "APPROVED").json()["errorCode"] == "INVALID_TRANSITION"
+    assert decision(8, "UNDER_REVIEW").json()["data"]["revision"] == 9
+    assert decision(8, "APPROVED").json()["errorCode"] == "REVISION_CONFLICT"
+    assert confirm(9, DETAILS).json()["errorCode"] == "INVALID_TRANSITION"
     assert (
         client.post(
             admin_path + "/decision",
             headers=admin,
             json={
-                "revision": 8,
+                "revision": 9,
                 "status": "NEEDS_MORE_INFO",
                 "reason": "Synthetic review",
             },
         ).json()["errorCode"]
         == "INVALID_REQUEST"
     )
-    assert decision(8, "NEEDS_MORE_INFO").json()["data"]["revision"] == 9
+    assert decision(9, "NEEDS_MORE_INFO").json()["data"]["revision"] == 10
     targeted = client.get(path, headers=driver).json()["data"]
     assert targeted["requestedChanges"] == {"captures": ["cccd_front"], "fields": ["gplx_name"]}
-    assert upload("selfie", 9, "blue").status_code == 403
-    assert confirm(9, {**DETAILS, "cccd_name": "UNREQUESTED"}).status_code == 403
-    assert upload("cccd_front", 9, "grey").json()["data"]["revision"] == 10
-    assert not submit(10, "submit-two").json()["success"]
+    assert upload("selfie", 10, "blue").status_code == 403
+    assert confirm(10, {**DETAILS, "cccd_name": "UNREQUESTED"}).status_code == 403
+    assert upload("cccd_front", 10, "grey").json()["data"]["revision"] == 11
+    assert not submit(11, "submit-two").json()["success"]
     prior = client.get(admin_path + "/captures/cccd_front", headers=admin)
     assert prior.content == image("white")
-    assert confirm(10, {**DETAILS, "gplx_name": "SYNTHETIC EDIT"}).json()["success"]
-    assert submit(11, "submit-two").json()["data"]["status"] == "SUBMITTED"
-    original = client.get(admin_path + "?snapshot=7", headers=admin).json()["data"]["document"]
+    assert confirm(11, {**DETAILS, "gplx_name": "SYNTHETIC EDIT"}).json()["success"]
+    assert submit(12, "submit-two").json()["data"]["status"] == "SUBMITTED"
+    original = client.get(admin_path + "?snapshot=8", headers=admin).json()["data"]["document"]
     assert original["confirmed"] == DETAILS
-    assert original["warningAcknowledgement"]["revision"] == 6
+    assert original["warningAcknowledgement"]["revision"] == 7
     assert "OCR_INCOMPLETE" in original["warningAcknowledgement"]["codes"]
-    assert all(item["documentRevision"] == 6 for item in original["verificationWarnings"])
+    assert all(item["documentRevision"] == 7 for item in original["verificationWarnings"])
     assert "cccd_front" in original["proposals"]
     current = client.get(admin_path, headers=admin).json()["data"]["document"]
     assert current["confirmed"]["gplx_name"] == "SYNTHETIC EDIT"
     assert "cccd_front" not in current["proposals"]
-    assert decision(12, "UNDER_REVIEW").json()["data"]["status"] == "UNDER_REVIEW"
+    assert decision(13, "UNDER_REVIEW").json()["data"]["status"] == "UNDER_REVIEW"
     queue_url = ROOT + "/admin/review-queue?status=UNDER_REVIEW&application_id=" + app["id"]
     queue = client.get(queue_url, headers=admin).json()["data"]
     assert not queue["hasMore"] and queue["items"][0]["resubmissionCount"] == 1
@@ -246,7 +247,7 @@ def test_submit_review_and_resubmit_keep_snapshots(verification, final_status):
 
     with ThreadPoolExecutor(2) as pool:
         decisions = list(
-            pool.map(lambda status: decision(13, status), (final_status, final_status))
+            pool.map(lambda status: decision(14, status), (final_status, final_status))
         )
     assert sorted(response.status_code for response in decisions) == [200, 409]
     assert next(item for item in decisions if item.status_code == 200).json()["data"]["status"] == (
@@ -255,7 +256,7 @@ def test_submit_review_and_resubmit_keep_snapshots(verification, final_status):
     assert next(item for item in decisions if item.status_code == 409).json()["errorCode"] == (
         "REVISION_CONFLICT"
     )
-    assert submit(6, "submit-one").json()["data"] == first.json()["data"]
+    assert submit(7, "submit-one").json()["data"] == first.json()["data"]
     feed_url = ROOT + "/internal/decision-events"
     assert client.get(feed_url, headers=admin).status_code == 401
     sync_headers = {"X-Verification-Sync-Key": SYNC_KEY}
@@ -263,24 +264,24 @@ def test_submit_review_and_resubmit_keep_snapshots(verification, final_status):
     events = feed["events"]
     assert {item["status"] for item in events} >= {"SUBMITTED", "UNDER_REVIEW", "NEEDS_MORE_INFO"}
     assert events[-1]["status"] == final_status
-    assert events[-1]["revision"] == 14
+    assert events[-1]["revision"] == 15
     assert "confirmed" not in events[-1]
     assert "reason" not in events[-1]
     if final_status == "APPROVED":
-        assert events[-1]["capabilityReview"]["submissionRevision"] == 12
+        assert events[-1]["capabilityReview"]["submissionRevision"] == 13
         assert events[-1]["capabilityReview"]["selectedGroupIds"] == ["moto-50-125"]
         assert "capabilityReview" not in events[-2]
         assert events[-1]["entitlements"] == [
             {"licenseClass": h, "kind": "NO_EXPIRY", "expiresOn": None} for h in ("A1", "B")
         ]
-        assert decision(14, "REVOKED", driver).status_code == 403
-        assert decision(14, "REVOKED").json()["data"]["status"] == "REVOKED"
-        assert decision(14, "REVOKED").status_code == 409
+        assert decision(15, "REVOKED", driver).status_code == 403
+        assert decision(15, "REVOKED").json()["data"]["status"] == "REVOKED"
+        assert decision(15, "REVOKED").status_code == 409
         replay = client.get(feed_url, params={"after": feed["head"]}, headers=sync_headers)
         revoked = replay.json()["data"]["events"]
         assert len(revoked) == 1 and revoked[0]["status"] == "REVOKED"
         assert revoked[0]["entitlements"] == []
-        assert decision(15, "NEEDS_MORE_INFO").json()["data"]["status"] == "NEEDS_MORE_INFO"
+        assert decision(16, "NEEDS_MORE_INFO").json()["data"]["status"] == "NEEDS_MORE_INFO"
     head = client.get(ROOT + "/internal/decision-head", headers=sync_headers).json()["data"]
     assert head["streamId"] == feed["streamId"]
     assert head["head"] >= feed["head"]
@@ -354,17 +355,18 @@ def test_face_comparison_requires_admin_current_revision_and_explicit_consent(
     def seed(uid, consent):
         actor = Actor(uid, False)
         key = store.create(actor)["id"]
-        for index, slot in enumerate(("cccd_front", "cccd_back", "gplx_front", "selfie")):
+        all_slots = ("cccd_front", "cccd_back", "gplx_front", "gplx_back", "selfie")
+        for index, slot in enumerate(all_slots):
             store.replace(key, actor, index, slot, "image/png", image("white"))
-        store.save(key, actor, 4, details=DETAILS)
+        store.save(key, actor, 5, details=DETAILS)
         response = client.post(
             ROOT + "/applications/" + key + "/submit",
             headers={**headers(uid), "Idempotency-Key": "synthetic-key"},
-            json={"revision": 5, "faceConsentVersion": consent},
+            json={"revision": 6, "faceConsentVersion": consent},
         )
         return response.json()["data"]
 
-    def face(app, token="admin", revision=6):
+    def face(app, token="admin", revision=7):
         path = ROOT + "/admin/applications/" + app["id"] + "/face-comparison"
         return client.post(
             path,
@@ -424,7 +426,7 @@ def test_face_comparison_requires_admin_current_revision_and_explicit_consent(
         assert worker.calls == 1
         with store.connect() as db:
             audit = db.execute("SELECT action, revision, submission FROM face_access").fetchall()
-            assert [tuple(row) for row in audit] == [("REQUEST_COMPARISON", 6, 6)]
+            assert [tuple(row) for row in audit] == [("REQUEST_COMPARISON", 7, 7)]
             snapshot = db.execute(
                 "SELECT payload FROM submissions WHERE application_id=?", (consented["id"],)
             ).fetchone()["payload"]
@@ -437,7 +439,7 @@ def test_face_comparison_requires_admin_current_revision_and_explicit_consent(
         mismatch = client.post(
             ROOT + "/applications/" + consented["id"] + "/submit",
             headers={**headers("driver-b"), "Idempotency-Key": "synthetic-key"},
-            json={"revision": 5},
+            json={"revision": 6},
         )
         assert mismatch.json()["errorCode"] == "IDEMPOTENCY_CONFLICT"
     finally:
@@ -451,14 +453,15 @@ def test_expired_document_allows_submission_but_blocks_approval(verification):
     store = client.app.state.verification_store
     driver = Actor("driver-a", False)
     key = store.create(driver)["id"]
-    for revision, slot in enumerate(("cccd_front", "cccd_back", "gplx_front", "selfie")):
+    all_slots = ("cccd_front", "cccd_back", "gplx_front", "gplx_back", "selfie")
+    for revision, slot in enumerate(all_slots):
         store.replace(key, driver, revision, slot, "image/png", image("white"))
     path = ROOT + "/applications/" + key
     admin = ROOT + "/admin/applications/" + key
     confirm = client.put(
         path + "/confirmation",
         headers=headers(),
-        json={"revision": 4, "details": {**DETAILS, "cccd_expiry_date": "2000-01-01"}},
+        json={"revision": 5, "details": {**DETAILS, "cccd_expiry_date": "2000-01-01"}},
     ).json()["data"]
     expiry = next(w for w in confirm["verificationWarnings"] if w["code"] == "CCCD_EXPIRED")
     assert expiry["blocksActivation"] and not expiry["blocksSubmission"]
@@ -466,7 +469,7 @@ def test_expired_document_allows_submission_but_blocks_approval(verification):
         client.post(
             path + "/submit",
             headers={**headers(), "Idempotency-Key": "expired-test"},
-            json={"revision": 5, "warningAcknowledgementRevision": 5},
+            json={"revision": 6, "warningAcknowledgementRevision": 6},
         ).json()["data"]["status"]
         == "SUBMITTED"
     )
@@ -474,12 +477,12 @@ def test_expired_document_allows_submission_but_blocks_approval(verification):
         client.post(
             admin + "/decision",
             headers=headers("admin"),
-            json={"revision": 6, "status": "UNDER_REVIEW"},
+            json={"revision": 7, "status": "UNDER_REVIEW"},
         ).status_code
         == 200
     )
     result = client.post(
-        admin + "/decision", headers=headers("admin"), json={"revision": 7, "status": "APPROVED"}
+        admin + "/decision", headers=headers("admin"), json={"revision": 8, "status": "APPROVED"}
     )
     assert result.status_code == 409
     assert result.json()["errorCode"] == "VERIFICATION_ACTIVATION_BLOCKED"

@@ -57,6 +57,13 @@ class Confirmation(Version):
     details: Details
 
 
+class QrScanRequest(Version):
+    rawPayload: str = Field(min_length=1, max_length=1024)
+    documentSide: Literal["FRONT", "BACK", "UNKNOWN"] = "UNKNOWN"
+    documentType: Literal["CCCD", "GPLX"] = "CCCD"
+    attachmentId: UUID | None = None
+
+
 class CapabilityReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     policyVersion: str = Field(pattern=r"^[A-Z0-9_]{1,80}$")
@@ -211,6 +218,28 @@ def extract(
     proposal = worker.extract(data, slot).model_dump(by_alias=True, mode="json")
     result = db.save(key, actor, body.revision, slot=slot, proposal=proposal)
     return ok(request, {**result, "proposal": proposal})
+
+
+@router.post("/applications/{application_id}/qr-scan")
+def qr_scan(
+    request: Request,
+    application_id: UUID,
+    body: QrScanRequest,
+    actor: User,
+    db: Store,
+):
+    return ok(
+        request,
+        db.save_qr_live_scan(
+            str(application_id),
+            actor,
+            body.revision,
+            body.rawPayload,
+            document_side=body.documentSide,
+            document_type=body.documentType,
+            attachment_id=str(body.attachmentId) if body.attachmentId else None,
+        ),
+    )
 
 
 @router.put("/applications/{application_id}/confirmation")

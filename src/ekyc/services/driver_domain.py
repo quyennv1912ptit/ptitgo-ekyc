@@ -5,7 +5,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 
 SLOTS = {"cccd_front", "cccd_back", "gplx_front", "gplx_back", "selfie"}
-REQUIRED = SLOTS - {"gplx_back"}
+REQUIRED = SLOTS
 
 
 class Details(BaseModel):

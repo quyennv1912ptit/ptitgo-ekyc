@@ -3,6 +3,7 @@
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+from ekyc.pipeline.qr import compare_name_values, compare_qr_and_ocr_fields
 from ekyc.services.driver_domain import name_comparison
 
 TEXT = {
@@ -13,6 +14,11 @@ TEXT = {
     "CARD_NOT_FOUND": "Chưa xác định được vùng thẻ.",
     "OCR_INCOMPLETE": "Lượt đọc chữ chưa lấy đủ thông tin.",
     "QR_OCR_CONFLICT": "Thông tin trích xuất từ các nguồn chưa khớp.",
+    "QR_OCR_NAME_DIACRITIC_MISMATCH": (
+        "Họ tên giữa mã QR và ảnh chữ đọc được chỉ khác dấu tiếng Việt."
+    ),
+    "QR_OCR_INSUFFICIENT_EVIDENCE": "Chưa đủ dữ liệu OCR để đối chiếu với mã QR.",
+    "QR_LIVE_SCAN_UNBOUND": "Mã QR quét trực tiếp chưa chứng minh thuộc ảnh giấy tờ đã tải lên.",
     "NAME_DIACRITIC_MISMATCH": "Họ tên giữa hai giấy tờ khác dấu.",
     "NAME_MISMATCH": "Họ tên giữa hai giấy tờ khác nhau.",
     "DOB_MISMATCH": "Ngày sinh giữa hai giấy tờ khác nhau.",
@@ -25,6 +31,9 @@ TEXT = {
     "FACE_NOT_EVALUATED": "Chưa thực hiện đối chiếu khuôn mặt.",
     "FACE_INSUFFICIENT_QUALITY": "Ảnh chưa đủ chất lượng để đối chiếu khuôn mặt.",
     "FACE_POSSIBLE_MISMATCH": "Có dấu hiệu không tương đồng giữa các ảnh chân dung.",
+    "DUPLICATE_CCCD_ACROSS_ACCOUNTS": (
+        "Số định danh CCCD này đã được xác minh hoặc sử dụng bởi một tài khoản tài xế khác."
+    ),
     "DOCUMENT_REQUIRED": "Còn thiếu ảnh bắt buộc.",
 }
 FACE_QUALITY_MESSAGES = {
@@ -43,7 +52,7 @@ FACE_QUALITY_MESSAGES = {
 FACE_WARNING_SLOTS = {"cccd_front", "gplx_front", "selfie"}
 
 IMAGE_CODES = {"IMAGE_BLURRY", "IMAGE_GLARE", "IMAGE_TOO_SMALL", "CARD_CROPPED", "CARD_NOT_FOUND"}
-REQUIRED_SLOTS = ("cccd_front", "cccd_back", "gplx_front", "selfie")
+REQUIRED_SLOTS = ("cccd_front", "cccd_back", "gplx_front", "gplx_back", "selfie")
 FIELD_NAMES = {
     "CCCD": {
         "id_number": "cccd_id",
@@ -51,6 +60,8 @@ FIELD_NAMES = {
         "dob": "cccd_dob",
         "gender": "cccd_gender",
         "expiry": "cccd_expiry_date",
+        "issue_date": "cccd_issue_date",
+        "address": "cccd_address",
     },
     "GPLX": {
         "id_number": "gplx_number",
@@ -80,7 +91,14 @@ def document_type(slot):
 
 
 def verification_warnings(
-    payload, revision, license_classes, *, today=None, face_statuses=(), face_quality=None
+    payload,
+    revision,
+    license_classes,
+    *,
+    today=None,
+    face_statuses=(),
+    face_quality=None,
+    duplicate_cccd_account=False,
 ):
     today = local_today() if today is None else today
     warnings = {}
@@ -135,6 +153,9 @@ def verification_warnings(
     cccd_ocr_expiry = None
     cccd_ocr_no_expiry = False
     cccd_ocr_attempted = False
+    cccd_ocr_fields = {}
+    gplx_ocr_fields = {}
+    qr_observations = []
     for slot, proposal in (payload.get("proposals") or {}).items():
         if not proposal.get("captureId") or proposal["captureId"] != (captures.get(slot) or {}).get(
             "id"
@@ -163,6 +184,36 @@ def verification_warnings(
         ):
             add("OCR_INCOMPLETE", "OCR", slot=slot)
         doc = document_type(slot)
+        if slot in {"cccd_front", "cccd_back", "gplx_front", "gplx_back"}:
+            target_ocr = cccd_ocr_fields if slot.startswith("cccd") else gplx_ocr_fields
+            for candidate in result.get("candidates", []):
+                if (
+                    candidate.get("source") == "OCR"
+                    and candidate.get("parseStatus") == "parsed"
+                    and candidate.get("validationStatus") == "valid"
+                    and candidate.get("candidateValue") is not None
+                ):
+                    key = candidate.get("fieldKey")
+                    if key:
+                        target_ocr.setdefault(key, candidate.get("candidateValue"))
+            qr_obj = result.get("qr")
+            if isinstance(qr_obj, dict) and qr_obj.get("status") in {"DECODED_VALID", "CONFLICT"}:
+                qr_fields = qr_obj.get("fields") or {}
+                if isinstance(qr_fields, dict) and qr_fields:
+                    qr_src = qr_obj.get("source") or "QR_IMAGE"
+                    qr_observations.append((doc, slot, qr_fields, qr_src))
+            else:
+                slot_qr_fields = {
+                    candidate["fieldKey"]: candidate["candidateValue"]
+                    for candidate in result.get("candidates", [])
+                    if candidate.get("source") == "QR"
+                    and candidate.get("parseStatus") == "parsed"
+                    and candidate.get("validationStatus") == "valid"
+                    and candidate.get("candidateValue") is not None
+                    and candidate.get("fieldKey")
+                }
+                if slot_qr_fields:
+                    qr_observations.append((doc, slot, slot_qr_fields, "QR_IMAGE"))
         for key in result.get("conflictFields", []):
             sources = {
                 candidate["source"]
@@ -172,6 +223,34 @@ def verification_warnings(
                 and candidate.get("source")
             }
             if {"QR", "OCR"} <= sources:
+                if key == "full_name" and slot in {
+                    "cccd_front",
+                    "cccd_back",
+                    "gplx_front",
+                    "gplx_back",
+                }:
+                    qr_name = next(
+                        (
+                            c.get("candidateValue")
+                            for c in result.get("candidates", [])
+                            if c.get("fieldKey") == "full_name"
+                            and c.get("source") == "QR"
+                            and c.get("candidateValue") is not None
+                        ),
+                        None,
+                    )
+                    ocr_name = next(
+                        (
+                            c.get("candidateValue")
+                            for c in result.get("candidates", [])
+                            if c.get("fieldKey") == "full_name"
+                            and c.get("source") == "OCR"
+                            and c.get("candidateValue") is not None
+                        ),
+                        None,
+                    )
+                    if compare_name_values(qr_name, ocr_name) == "DIACRITIC_MISMATCH":
+                        continue
                 add("QR_OCR_CONFLICT", "QR_OCR", slot=slot, field=FIELD_NAMES.get(doc, {}).get(key))
             elif "OCR" in sources:
                 add("OCR_INCOMPLETE", "OCR", slot=slot, field=FIELD_NAMES.get(doc, {}).get(key))
@@ -214,6 +293,54 @@ def verification_warnings(
                             and "expiry_date" in expiry
                             and expiry["expiry_date"] is None
                         )
+    for live_doc, live_key in (
+        ("CCCD", "qrLiveScan"),
+        ("GPLX", "gplxQrLiveScan"),
+    ):
+        live_qr = payload.get(live_key)
+        if isinstance(live_qr, dict) and live_qr.get("status") in {"DECODED_VALID", "CONFLICT"}:
+            side = live_qr.get("documentSide")
+            if live_doc == "GPLX":
+                live_slot = "gplx_front" if side == "FRONT" else "gplx_back"
+            else:
+                live_slot = "cccd_back" if side == "BACK" else "cccd_front"
+            live_fields = live_qr.get("fields") or {}
+            if isinstance(live_fields, dict) and live_fields:
+                qr_observations.append((live_doc, live_slot, live_fields, "QR_LIVE_SCAN"))
+            if not live_qr.get("boundToCapture", False):
+                add("QR_LIVE_SCAN_UNBOUND", "QR_OCR", slot=live_slot, severity="INFO")
+    for qr_doc, qr_slot, qr_fields, _qr_source in qr_observations:
+        ocr_pool = gplx_ocr_fields if qr_doc == "GPLX" else cccd_ocr_fields
+        summary = compare_qr_and_ocr_fields(qr_fields, ocr_pool)
+        for key in summary.conflict_fields:
+            mapped_field = FIELD_NAMES.get(qr_doc, {}).get(key, key)
+            if key in summary.diacritic_mismatch_fields:
+                add(
+                    "QR_OCR_NAME_DIACRITIC_MISMATCH",
+                    "QR_OCR",
+                    slot=qr_slot,
+                    field=mapped_field,
+                    severity="WARNING",
+                )
+            else:
+                add(
+                    "QR_OCR_CONFLICT",
+                    "QR_OCR",
+                    slot=qr_slot,
+                    field=mapped_field,
+                    severity="CRITICAL" if key in {"id_number", "dob", "full_name"} else "WARNING",
+                )
+        if summary.status == "INSUFFICIENT_EVIDENCE":
+            add("QR_OCR_INSUFFICIENT_EVIDENCE", "QR_OCR", slot=qr_slot, severity="INFO")
+    if duplicate_cccd_account:
+        add(
+            "DUPLICATE_CCCD_ACROSS_ACCOUNTS",
+            "CROSS_ACCOUNT",
+            slot="cccd_front",
+            field="cccd_id",
+            severity="CRITICAL",
+            block=True,
+        )
     name = name_comparison(fields.get("cccd_name"), fields.get("gplx_name"))
     if name in {"DIACRITIC_MISMATCH", "NAME_MISMATCH"}:
         add(

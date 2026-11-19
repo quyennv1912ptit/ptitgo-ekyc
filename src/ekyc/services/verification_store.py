@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -11,6 +12,11 @@ from uuid import uuid4
 
 from ekyc.config import Settings
 from ekyc.core.errors import EkycError, ErrorCode
+from ekyc.pipeline.qr import (
+    compare_qr_and_ocr_fields,
+    compute_lookup_hmac,
+    parse_qr_payload,
+)
 from ekyc.services.document_storage import DocumentStorage, LocalDocumentStorage
 from ekyc.services.driver_auth import Actor
 from ekyc.services.driver_domain import (
@@ -46,6 +52,12 @@ class VerificationStore:
         key = settings.verification_storage_key
         if settings.deployed and key is None:
             raise ValueError("Production verification storage requires encryption")
+        hmac_secret = settings.verification_lookup_hmac_key or key
+        lookup_hmac_key = (
+            hashlib.sha256(hmac_secret.get_secret_value().encode()).digest()
+            if hmac_secret is not None
+            else os.urandom(32)
+        )
         storage = LocalDocumentStorage(
             settings.verification_storage_dir or path.with_suffix(".objects"),
             key.get_secret_value() if key else None,
@@ -55,6 +67,7 @@ class VerificationStore:
             storage,
             license_classes=settings.license_class_codes,
             face_enabled=enabled(settings),
+            lookup_hmac_key=lookup_hmac_key,
         )
         with store.connect(write=True) as db:
             db.execute("CREATE TABLE IF NOT EXISTS storage_binding (id TEXT PRIMARY KEY)")
@@ -69,7 +82,13 @@ class VerificationStore:
         return store
 
     def __init__(
-        self, path: Path, storage: DocumentStorage, *, license_classes=None, face_enabled=False
+        self,
+        path: Path,
+        storage: DocumentStorage,
+        *,
+        license_classes=None,
+        face_enabled=False,
+        lookup_hmac_key: bytes | None = None,
     ):
         self.license_classes = frozenset(
             Settings.model_fields["license_class_codes"].default
@@ -77,6 +96,9 @@ class VerificationStore:
             else license_classes
         )
         self.face_enabled = face_enabled
+        self.lookup_hmac_key = (
+            lookup_hmac_key if lookup_hmac_key is not None else os.urandom(32)
+        )
         self.path = path.resolve()
         if self.path.is_relative_to((Path(__file__).resolve().parents[3] / "frontend").resolve()):
             raise ValueError("Verification database must be outside the web root")
@@ -160,6 +182,18 @@ class VerificationStore:
                 );
             """)
         with self.connect(write=True) as db:
+            app_columns = {row["name"] for row in db.execute("PRAGMA table_info(applications)")}
+            if "cccd_id_hmac" not in app_columns:
+                db.execute("ALTER TABLE applications ADD COLUMN cccd_id_hmac TEXT")
+            if "qr_cccd_id_hmac" not in app_columns:
+                db.execute("ALTER TABLE applications ADD COLUMN qr_cccd_id_hmac TEXT")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS applications_cccd_hmac ON applications(cccd_id_hmac)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS applications_qr_cccd_hmac "
+                "ON applications(qr_cccd_id_hmac)"
+            )
             columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(verification_sync_events)")
             }
@@ -311,14 +345,56 @@ class VerificationStore:
             "updatedAt": row["updated_at"],
         }
 
-    def warnings(self, payload, revision, *, face_statuses=(), face_quality=None):
+    def warnings(
+        self,
+        payload,
+        revision,
+        *,
+        face_statuses=(),
+        face_quality=None,
+        duplicate_cccd_account=False,
+    ):
         return verification_warnings(
             payload,
             revision,
             self.license_classes,
             face_statuses=face_statuses,
             face_quality=face_quality,
+            duplicate_cccd_account=duplicate_cccd_account,
         )
+
+    def _extract_qr_cccd_id(self, payload: dict) -> str | None:
+        captures = payload.get("captures") or {}
+        for slot in ("cccd_front", "cccd_back"):
+            proposal = (payload.get("proposals") or {}).get(slot)
+            if not isinstance(proposal, dict):
+                continue
+            if proposal.get("captureId") != (captures.get(slot) or {}).get("id"):
+                continue
+            qr = (proposal.get("result") or {}).get("qr")
+            if isinstance(qr, dict) and qr.get("status") in {"DECODED_VALID", "CONFLICT"}:
+                if cccd_id := (qr.get("fields") or {}).get("id_number"):
+                    return str(cccd_id)
+        live = payload.get("qrLiveScan")
+        if isinstance(live, dict) and live.get("status") in {"DECODED_VALID", "CONFLICT"}:
+            if cccd_id := (live.get("fields") or {}).get("id_number"):
+                return str(cccd_id)
+        return None
+
+    def _has_duplicate_qr_cccd(self, db, row, payload: dict) -> bool:
+        qr_cccd = self._extract_qr_cccd_id(payload)
+        if not qr_cccd:
+            return False
+        digest = compute_lookup_hmac(qr_cccd, self.lookup_hmac_key)
+        hit = db.execute(
+            """SELECT 1 FROM applications
+               WHERE owner <> ?
+                 AND status IN ('APPROVED', 'SUBMITTED', 'UNDER_REVIEW', 'NEEDS_MORE_INFO')
+                 AND (cccd_id_hmac = ? OR qr_cccd_id_hmac = ?)
+               LIMIT 1""",
+            (row["owner"], digest, digest),
+        ).fetchone()
+        return hit is not None
 
     def face_warnings(self, revision, *, statuses=(), quality=None):
         return [
@@ -327,10 +403,13 @@ class VerificationStore:
             if warning["evidenceSource"] == "FACE_COMPARISON"
         ]
 
-    def with_warnings(self, row, payload):
+    def with_warnings(self, row, payload, *, db=None):
+        duplicate = self._has_duplicate_qr_cccd(db, row, payload) if db is not None else False
         return {
             **self.metadata(row),
-            "verificationWarnings": self.warnings(payload, row["revision"]),
+            "verificationWarnings": self.warnings(
+                payload, row["revision"], duplicate_cccd_account=duplicate
+            ),
         }
 
     @staticmethod
@@ -387,7 +466,9 @@ class VerificationStore:
                 key = str(uuid4())
                 payload = {"captures": {}, "proposals": {}, "confirmed": None}
                 db.execute(
-                    "INSERT INTO applications VALUES (?,?,'DRAFT',0,?,NULL,NULL,?)",
+                    "INSERT INTO applications "
+                    "(id, owner, status, revision, payload, reason, submission, updated_at) "
+                    "VALUES (?,?,'DRAFT',0,?,NULL,NULL,?)",
                     (key, actor.uid, json.dumps(payload), now()),
                 )
                 row = self.row(db, key, actor)
@@ -507,6 +588,7 @@ class VerificationStore:
                 warning_revision,
                 face_statuses=evidence.get("pairs", ()),
                 face_quality=evidence.get("quality"),
+                duplicate_cccd_account=self._has_duplicate_qr_cccd(db, row, warning_payload),
             )
             events = db.execute(
                 """SELECT revision, actor, role, action, metadata, at FROM audit
@@ -589,12 +671,29 @@ class VerificationStore:
                     )
                 payload["captures"][slot] = {"id": capture, "mime": mime, "quality": quality}
                 payload["proposals"].pop(slot, None)
+                live_key_for_slot = (
+                    "qrLiveScan"
+                    if slot in {"cccd_front", "cccd_back"}
+                    else "gplxQrLiveScan"
+                    if slot in {"gplx_front", "gplx_back"}
+                    else None
+                )
+                if live_key_for_slot and isinstance(live := payload.get(live_key_for_slot), dict):
+                    side = "FRONT" if slot.endswith("_front") else "BACK"
+                    if (
+                        (old and live.get("attachmentId") == old["id"])
+                        or live.get("documentSide") in {side, "UNKNOWN", None}
+                    ):
+                        payload.pop(live_key_for_slot, None)
                 payload["confirmationCurrent"] = False
                 row = self.advance(db, row, payload)
+                qr_id = self._extract_qr_cccd_id(payload)
+                qr_hmac = compute_lookup_hmac(qr_id, self.lookup_hmac_key) if qr_id else None
+                db.execute("UPDATE applications SET qr_cccd_id_hmac=? WHERE id=?", (qr_hmac, key))
                 self.audit(
                     db, row, actor, "REPLACE_CAPTURE" if old else "ADD_CAPTURE", {"slot": slot}
                 )
-                return self.with_warnings(row, payload)
+                return self.with_warnings(row, payload, db=db)
         except BaseException as exc:
             if published is not None:
                 self._rollback_object(published)
@@ -675,16 +774,173 @@ class VerificationStore:
                 payload["confirmed"] = details
                 payload["confirmationCurrent"] = True
                 action, event = "CONFIRM_FIELDS", {"changedFields": changed}
+                cccd_id = (details.get("cccd_id") or "").strip()
+                cccd_hmac = (
+                    compute_lookup_hmac(cccd_id, self.lookup_hmac_key)
+                    if len(cccd_id) == 12 and cccd_id.isdigit()
+                    else None
+                )
+                db.execute("UPDATE applications SET cccd_id_hmac=? WHERE id=?", (cccd_hmac, key))
             else:
                 self.enforce_slot(db, row, slot)
+                capture_id = payload["captures"][slot]["id"]
+                if isinstance(proposal, dict) and isinstance(proposal.get("qr"), dict):
+                    proposal["qr"]["attachmentId"] = capture_id
+                    proposal["qr"]["revision"] = row["revision"] + 1
+                    proposal["qr"]["source"] = "QR_IMAGE"
                 payload["proposals"][slot] = {
-                    "captureId": payload["captures"][slot]["id"],
+                    "captureId": capture_id,
                     "result": proposal,
                 }
+                qr_id = self._extract_qr_cccd_id(payload)
+                qr_hmac = compute_lookup_hmac(qr_id, self.lookup_hmac_key) if qr_id else None
+                db.execute("UPDATE applications SET qr_cccd_id_hmac=? WHERE id=?", (qr_hmac, key))
                 action, event = "EXTRACT", {"slot": slot}
             row = self.advance(db, row, payload)
             self.audit(db, row, actor, action, event)
-            return self.with_warnings(row, payload)
+            return self.with_warnings(row, payload, db=db)
+
+    def save_qr_live_scan(
+        self,
+        key,
+        actor,
+        revision,
+        raw_payload: str,
+        *,
+        document_side: str = "UNKNOWN",
+        document_type: str = "CCCD",
+        attachment_id: str | None = None,
+    ):
+        doc_type = "GPLX" if document_type == "GPLX" else "CCCD"
+        doc_prefix = doc_type.lower()
+        slots_pair = (f"{doc_prefix}_front", f"{doc_prefix}_back")
+        live_key = "gplxQrLiveScan" if doc_type == "GPLX" else "qrLiveScan"
+
+        with self.connect(write=True) as db:
+            row = self.row(db, key, actor)
+            self.check_revision(row, revision)
+            payload = json.loads(row["payload"])
+            target_slot = (
+                f"{doc_prefix}_front"
+                if document_side == "FRONT"
+                else f"{doc_prefix}_back"
+                if document_side == "BACK"
+                else None
+            )
+            targets = self.requested(db, row)
+            if targets is not None:
+                allowed = set(targets.get("captures") or ())
+                if target_slot is not None and target_slot not in allowed:
+                    raise EkycError(ErrorCode.FORBIDDEN)
+                if target_slot is None and not (set(slots_pair) & allowed):
+                    raise EkycError(ErrorCode.FORBIDDEN)
+
+            captures = payload.get("captures") or {}
+            front_cap = captures.get(slots_pair[0])
+            back_cap = captures.get(slots_pair[1])
+            if attachment_id is not None:
+                valid_ids = (
+                    {captures[target_slot]["id"]}
+                    if target_slot is not None and target_slot in captures
+                    else {
+                        cap["id"]
+                        for s in slots_pair
+                        if isinstance((cap := captures.get(s)), dict) and cap.get("id")
+                    }
+                )
+                if attachment_id not in valid_ids:
+                    raise EkycError(ErrorCode.REVISION_CONFLICT)
+                bound_capture_id = attachment_id
+            elif target_slot is not None:
+                bound_capture_id = (captures.get(target_slot) or {}).get("id")
+            else:
+                primary = (back_cap or front_cap) if doc_type == "GPLX" else (front_cap or back_cap)
+                bound_capture_id = (primary or {}).get("id")
+
+            default_slot = f"{doc_prefix}_back" if doc_type == "GPLX" else f"{doc_prefix}_front"
+            parsed = parse_qr_payload(raw_payload, slot=target_slot or default_slot)
+            if parsed.status != "DECODED_VALID":
+                qr_entry = {
+                    "status": parsed.status,
+                    "source": "QR_LIVE_SCAN",
+                    "documentSide": document_side,
+                    "cardVariant": "GPLX_PET" if doc_type == "GPLX" else None,
+                    "fields": {},
+                    "missingFields": [],
+                    "conflictFields": [],
+                    "warnings": list(parsed.warnings),
+                    "crossValidationStatus": "NOT_APPLICABLE",
+                    "attachmentId": bound_capture_id,
+                    "revision": row["revision"],
+                    "boundToCapture": False,
+                }
+                return {**self.with_warnings(row, payload, db=db), "qr": qr_entry}
+
+            ocr_fields: dict[str, object] = {}
+            for s in slots_pair:
+                prop = (payload.get("proposals") or {}).get(s)
+                if not isinstance(prop, dict):
+                    continue
+                if prop.get("captureId") != (captures.get(s) or {}).get("id"):
+                    continue
+                for cand in (prop.get("result") or {}).get("candidates", []):
+                    if (
+                        cand.get("source") == "OCR"
+                        and cand.get("parseStatus") == "parsed"
+                        and cand.get("validationStatus") == "valid"
+                        and cand.get("candidateValue") is not None
+                        and cand.get("fieldKey")
+                    ):
+                        ocr_fields.setdefault(cand["fieldKey"], cand["candidateValue"])
+
+            summary = compare_qr_and_ocr_fields(parsed.fields, ocr_fields)
+            qr_status = "CONFLICT" if summary.conflict_fields else "DECODED_VALID"
+            warnings_list = list(parsed.warnings)
+            if summary.diacritic_mismatch_fields:
+                if "QR_OCR_NAME_DIACRITIC_MISMATCH" not in warnings_list:
+                    warnings_list.append("QR_OCR_NAME_DIACRITIC_MISMATCH")
+            if any(f not in summary.diacritic_mismatch_fields for f in summary.conflict_fields):
+                if "QR_OCR_MISMATCH" not in warnings_list:
+                    warnings_list.append("QR_OCR_MISMATCH")
+            if summary.status == "INSUFFICIENT_EVIDENCE":
+                warnings_list.append("QR_OCR_INSUFFICIENT_EVIDENCE")
+
+            next_rev = row["revision"] + 1
+            qr_entry = {
+                "status": qr_status,
+                "source": "QR_LIVE_SCAN",
+                "documentSide": document_side,
+                "cardVariant": "GPLX_PET" if doc_type == "GPLX" else None,
+                "fields": dict(parsed.fields),
+                "missingFields": list(parsed.missing_fields),
+                "conflictFields": list(summary.conflict_fields),
+                "warnings": warnings_list,
+                "crossValidationStatus": summary.status,
+                "attachmentId": bound_capture_id,
+                "revision": next_rev,
+                "boundToCapture": False,
+            }
+            payload[live_key] = qr_entry
+            row = self.advance(db, row, payload)
+            if doc_type == "CCCD":
+                qr_id = self._extract_qr_cccd_id(payload)
+                qr_hmac = compute_lookup_hmac(qr_id, self.lookup_hmac_key) if qr_id else None
+                db.execute("UPDATE applications SET qr_cccd_id_hmac=? WHERE id=?", (qr_hmac, key))
+            self.audit(
+                db,
+                row,
+                actor,
+                "QR_LIVE_SCAN",
+                {
+                    "source": "QR_LIVE_SCAN",
+                    "documentType": doc_type,
+                    "documentSide": document_side,
+                    "attachmentId": bound_capture_id,
+                    "status": qr_status,
+                    "hasConflicts": bool(summary.conflict_fields),
+                },
+            )
+            return {**self.with_warnings(row, payload, db=db), "qr": qr_entry}
 
     def submit(self, key, actor, expected, idem, face_consent=None, warning_ack_revision=None):
         with self.connect(write=True) as db:
@@ -718,7 +974,11 @@ class VerificationStore:
                 ):
                     raise EkycError(ErrorCode.FIELD_MISSING)
             warnings = comparison_warnings(payload["confirmed"])
-            structured = self.warnings(payload, expected)
+            structured = self.warnings(
+                payload,
+                expected,
+                duplicate_cccd_account=self._has_duplicate_qr_cccd(db, row, payload),
+            )
             requires_review = sorted({w["code"] for w in structured if w["requiresReview"]})
             if any(w["blocksSubmission"] for w in structured):
                 raise EkycError(ErrorCode.FIELD_MISSING)
@@ -866,7 +1126,12 @@ class VerificationStore:
                 raise EkycError(ErrorCode.INVALID_TRANSITION)
             payload = json.loads(row["payload"])
             if status == "APPROVED":
-                warnings = self.warnings(self.snapshot(db, row), expected)
+                snap = self.snapshot(db, row)
+                warnings = self.warnings(
+                    snap,
+                    expected,
+                    duplicate_cccd_account=self._has_duplicate_qr_cccd(db, row, snap),
+                )
                 if any(w["blocksActivation"] for w in warnings):
                     raise EkycError(ErrorCode.VERIFICATION_ACTIVATION_BLOCKED)
             if status == "NEEDS_MORE_INFO":
