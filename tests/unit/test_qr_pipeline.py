@@ -603,3 +603,309 @@ def test_gplx_qr_parsing_image_decoding_and_live_scan(settings, tmp_path, monkey
         refreshed = client.get(path, headers=driver).json()["data"]
         assert refreshed["document"]["gplxQrLiveScan"]["fields"]["vehicle_class"] == ["A1", "B2"]
         assert not refreshed["document"].get("qrLiveScan")
+
+
+def test_cccd_back_ocr_skip_vs_required_and_gplx_glare_4corner_fallback(settings):
+    from fastapi.testclient import TestClient
+
+    from ekyc.main import create_app
+    from ekyc.pipeline.ocr.base import OcrLine
+
+    # 1. Can Cuoc 2024 on cccd_back with valid issue_date in QR still runs 1 lightweight
+    #    classification view (max 960px, not 2 views) and skips redundant field OCR cleanly.
+    payload_2024 = "046096003095||TRẦN THỊ MẪU|12/04/1998|Nữ|TP.HCM|15/08/2024"
+    card_2024 = _make_qr_card(payload_2024, region="back_mr", blur=False)
+    prep = SimpleNamespace(prepare_loaded=lambda loaded, diagnostics=True: PreparedCard(card_2024))
+    ocr_calls = 0
+    observed_max_sides: list[int] = []
+
+    def classify_probe(img):
+        nonlocal ocr_calls
+        ocr_calls += 1
+        observed_max_sides.append(max(img.shape[:2]))
+        return [OcrLine("ĐẶC ĐIỂM NHẬN DẠNG", 0.95, 20, 20, 220, 44)]
+
+    cls_back = SimpleNamespace(
+        classify=lambda *_: DocClassification(DocType.CCCD, Side.BACK, 0.9, 0, [], True)
+    )
+    back_with_qr = DocumentExtractor(
+        settings, prep, SimpleNamespace(read_lines=classify_probe), cls_back
+    ).extract(_encode_png(card_2024), "cccd_back")
+    assert ocr_calls == 1
+    assert observed_max_sides == [960]
+    assert back_with_qr.ocr_status == "SKIPPED"
+    assert "DOCUMENT_SLOT_MISMATCH" not in back_with_qr.warnings
+    assert back_with_qr.qr is not None
+    assert back_with_qr.qr.status == "DECODED_VALID"
+    assert back_with_qr.qr.fields["issue_date"] == "2024-08-15"
+
+    # 1b. Explicitly requested ocr_mode="classify_only" on valid CCCD_BACK early-stops at 1 view.
+    ocr_calls = 0
+    observed_max_sides.clear()
+    blank_back = np.full((600, 950, 3), 235, dtype=np.uint8)
+    prep_blank = SimpleNamespace(
+        prepare_loaded=lambda loaded, diagnostics=True: PreparedCard(blank_back)
+    )
+    back_classify_ok = DocumentExtractor(
+        settings, prep_blank, SimpleNamespace(read_lines=classify_probe), cls_back
+    ).extract(_encode_png(blank_back), "cccd_back", ocr_mode="classify_only")
+    assert ocr_calls == 1
+    assert back_classify_ok.ocr_status == "SKIPPED"
+    assert "DOCUMENT_SLOT_MISMATCH" not in back_classify_ok.warnings
+
+    # 1c. Wrong document type (GPLX_FRONT) uploaded as cccd_back under classify_only -> MISMATCH!
+    cls_gplx = SimpleNamespace(
+        classify=lambda *_: DocClassification(DocType.GPLX, Side.FRONT, 0.9, 0, [], True)
+    )
+    wrong_doc = DocumentExtractor(
+        settings, prep_blank, SimpleNamespace(read_lines=classify_probe), cls_gplx
+    ).extract(_encode_png(blank_back), "cccd_back", ocr_mode="classify_only")
+    assert wrong_doc.ocr_status == "OCR_NO_FIELDS"
+    assert "DOCUMENT_SLOT_MISMATCH" in wrong_doc.warnings
+
+    # 1d. CCCD 2021 FRONT (WITH valid QR!) mistakenly uploaded into cccd_back -> STILL detects
+    #     DOCUMENT_SLOT_MISMATCH under BOTH classify_only and auto-QR fallback!
+    front_card = _make_qr_card(payload_2024, region="front_tr", blur=False)
+    prep_front = SimpleNamespace(
+        prepare_loaded=lambda loaded, diagnostics=True: PreparedCard(front_card)
+    )
+    cls_cccd_front = SimpleNamespace(
+        classify=lambda *_: DocClassification(DocType.CCCD, Side.FRONT, 0.95, 0, [], True)
+    )
+    for mode in ("classify_only", "full"):
+        dup_front = DocumentExtractor(
+            settings, prep_front, SimpleNamespace(read_lines=classify_probe), cls_cccd_front
+        ).extract(_encode_png(front_card), "cccd_back", ocr_mode=mode)
+        assert "DOCUMENT_SLOT_MISMATCH" in dup_front.warnings
+        assert dup_front.ocr_status == "OCR_NO_FIELDS"
+
+    # 1e. Blank/unreadable capture under classify_only -> OCR_NO_TEXT (not silent SKIPPED).
+    cls_unknown = SimpleNamespace(
+        classify=lambda *_: DocClassification(DocType.UNKNOWN, Side.UNKNOWN, 0.0, 0, [], False)
+    )
+    blank_res = DocumentExtractor(
+        settings, prep_blank, SimpleNamespace(read_lines=lambda _: []), cls_unknown
+    ).extract(_encode_png(blank_back), "cccd_back", ocr_mode="classify_only")
+    assert blank_res.ocr_status == "OCR_NO_TEXT"
+    assert "DOCUMENT_SLOT_MISMATCH" not in blank_res.warnings
+
+    # 2. cccd_back WITHOUT QR must STILL execute full EasyOCR and early-stop when issue_date parsed.
+    ocr_calls = 0
+
+    def read_with_issue_date(_img):
+        nonlocal ocr_calls
+        ocr_calls += 1
+        return [OcrLine("Ngày cấp: 15/08/2024", 0.95, 20, 40, 260, 65)]
+
+    back_no_qr = DocumentExtractor(
+        settings, prep_blank, SimpleNamespace(read_lines=read_with_issue_date), cls_back
+    ).extract(_encode_png(blank_back), "cccd_back")
+    assert ocr_calls == 1
+    assert back_no_qr.ocr_status == "OCR_READ"
+    assert back_no_qr.qr is not None
+    assert back_no_qr.qr.status == "NOT_FOUND"
+    assert any(
+        c.field_key == "issue_date" and c.candidate_value == "2024-08-15"
+        for c in back_no_qr.candidates
+    )
+
+    # Route query param contract: /documents/{slot}/extract?ocr_mode=classify_only vs invalid 400
+    route_app = create_app(settings)
+    seen_calls: list[tuple[str, str]] = []
+
+    class StubWorker:
+        def extract(self, _raw, slot, source="both", *, ocr_mode="full", timeout=None):
+            seen_calls.append((slot, ocr_mode))
+            from ekyc.schemas.document import ExtractionResult
+
+            return ExtractionResult(slot=slot, ocr_status="SKIPPED")
+
+        def close(self):
+            pass
+
+    with TestClient(route_app) as route_client:
+        route_app.state.cccd_worker = StubWorker()
+        hdrs = {"X-API-Key": settings.ekyc_api_key.get_secret_value()}
+        res_ok = route_client.post(
+            "/ekyc/documents/cccd_back/extract?ocr_mode=classify_only",
+            headers=hdrs,
+            content=_encode_png(blank_back),
+        )
+        assert res_ok.status_code == 200
+        assert res_ok.json()["data"]["ocrStatus"] == "SKIPPED"
+        assert seen_calls == [("cccd_back", "classify_only")]
+        res_bad = route_client.post(
+            "/ekyc/documents/cccd_back/extract?ocr_mode=bogus",
+            headers=hdrs,
+            content=_encode_png(blank_back),
+        )
+        assert res_bad.status_code == 400
+
+    # 3. All 4 corners + 0/90/180/270 rotations + PET glare rescue + budget cap + multi-QR safety
+    gplx_payload = "790123456789|NGUYỄN VĂN MẪU|01/01/1996|A1, B2|Sở GTVT Hà Nội"
+    qr = cv2.QRCodeEncoder_create().encode(gplx_payload)
+    qr = cv2.copyMakeBorder(qr, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=255)
+    qr_small = cv2.cvtColor(
+        cv2.resize(qr, (130, 130), interpolation=cv2.INTER_AREA), cv2.COLOR_GRAY2BGR
+    )
+    scene = np.full((1200, 1600, 3), 210, dtype=np.uint8)
+    scene[880:1010, 1280:1410] = qr_small  # bottom-right quadrant missed by [:2] before!
+    # Apply PET glare over bottom-right QR
+    yy, xx = np.mgrid[0:1200, 0:1600].astype(np.float32)
+    glare = (np.exp(-((xx - 1350) ** 2 + (yy - 940) ** 2) / (2 * 110 * 110)) * 0.68)[..., None]
+    glared = np.clip(scene.astype(np.float32) * (1.0 - glare) + 255.0 * glare, 0, 255).astype(
+        np.uint8
+    )
+    for rot in (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE):
+        frame = glared if rot is None else cv2.rotate(glared, rot)
+        decoded = decode_qr_image(frame, "gplx_back", warped=False, try_fallback=True, today=TODAY)
+        assert decoded.parsed.status == "DECODED_VALID"
+        assert decoded.parsed.fields["vehicle_class"] == ["A1", "B2"]
+
+    # Budget exhaustion on blank image must return NOT_FOUND cleanly without crashing
+    empty = np.full((800, 1200, 3), 220, dtype=np.uint8)
+    capped = decode_qr_image(
+        empty, "gplx_back", warped=False, try_fallback=True, max_attempts=3, time_budget_s=0.05
+    )
+    assert capped.parsed.status == "NOT_FOUND"
+
+    # gplx_back YOLO warp fallback rescues tilted card when raw pass sees only warped card ROI
+    tilted_scene = np.full((1200, 1600, 3), 120, dtype=np.uint8)
+    src = np.float32([[0, 0], [900, 0], [900, 560], [0, 560]])
+    dst = np.float32([[250, 200], [1200, 350], [1150, 920], [200, 820]])
+    warped_card = _make_qr_card(gplx_payload, width=900, height=560, region="gplx_back_left")
+    cv2.warpPerspective(
+        warped_card,
+        cv2.getPerspectiveTransform(src, dst),
+        (1600, 1200),
+        dst=tilted_scene,
+        borderMode=cv2.BORDER_TRANSPARENT,
+    )
+    gplx_prep = SimpleNamespace(prepare_loaded=lambda loaded: PreparedCard(warped_card))
+    gplx_res = DocumentExtractor(
+        settings, gplx_prep, SimpleNamespace(read_lines=lambda _: []), cls_back
+    ).extract(_encode_png(tilted_scene), "gplx_back")
+    assert gplx_res.ocr_status == "OCR_UNSUPPORTED"
+    assert gplx_res.qr is not None
+    assert gplx_res.qr.status == "DECODED_VALID"
+    assert gplx_res.qr.fields["vehicle_class"] == ["A1", "B2"]
+
+
+def _make_dual_qr_canvas(payload_left: str, payload_right: str) -> np.ndarray:
+    canvas = np.full((1000, 1600, 3), 235, dtype=np.uint8)
+    for x0, payload in ((160, payload_left), (960, payload_right)):
+        qr = cv2.QRCodeEncoder_create().encode(payload)
+        qr = cv2.copyMakeBorder(qr, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=255)
+        qr_bgr = cv2.cvtColor(
+            cv2.resize(qr, (260, 260), interpolation=cv2.INTER_NEAREST),
+            cv2.COLOR_GRAY2BGR,
+        )
+        canvas[240:500, x0 : x0 + 260] = qr_bgr
+    return canvas
+
+
+def test_multi_qr_distinct_identities_conflict_and_unified_budget(settings, monkeypatch):
+    from ekyc.pipeline import qr as qr_mod
+    from ekyc.services import document_extraction as de_mod
+
+    cls_front = SimpleNamespace(
+        classify=lambda *_: DocClassification(DocType.CCCD, Side.FRONT, 0.9, 0, [], True)
+    )
+    ocr_stub = SimpleNamespace(read_lines=lambda _: [])
+    prep_stub = SimpleNamespace(
+        prepare_loaded=lambda loaded, diagnostics=True: PreparedCard(loaded.bgr)
+    )
+
+    # 1. Two distinct CCCD identities -> CONFLICT, empty fields, MULTIPLE_DISTINCT_QR_IDENTITIES
+    cccd_a = "001095001111||NGUYỄN VĂN A|01011995|Nam|HN|01052021"
+    cccd_b = "001096002222||TRẦN THỊ B|02021996|Nữ|HCM|15082024"
+    dual_cccd = _make_dual_qr_canvas(cccd_a, cccd_b)
+    decoded_cccd = decode_qr_image(dual_cccd, "cccd_front", warped=False, try_fallback=True)
+    assert decoded_cccd.parsed.status == "CONFLICT"
+    assert decoded_cccd.parsed.fields == {}
+    assert "MULTIPLE_DISTINCT_QR_IDENTITIES" in decoded_cccd.parsed.warnings
+    assert {"id_number", "full_name", "dob"} <= set(decoded_cccd.parsed.conflict_fields)
+
+    res_cccd = DocumentExtractor(settings, prep_stub, ocr_stub, cls_front).extract(
+        _encode_png(dual_cccd), "cccd_front"
+    )
+    assert res_cccd.qr is not None
+    assert res_cccd.qr.status == "CONFLICT"
+    assert res_cccd.qr.fields == {}
+    assert res_cccd.qr.bound_to_capture is False
+    assert res_cccd.qr.cross_validation_status == "CONFLICT"
+    assert "MULTIPLE_DISTINCT_QR_IDENTITIES" in res_cccd.warnings
+    assert "MULTIPLE_DISTINCT_QR_IDENTITIES" in res_cccd.qr.warnings
+    assert {"id_number", "full_name", "dob"} <= set(res_cccd.conflict_fields)
+    assert not any(c.source == "QR" for c in res_cccd.candidates)
+
+    # 2. Two distinct GPLX identities -> CONFLICT, MULTIPLE_DISTINCT_QR_IDENTITIES
+    gplx_a = "790123456789|NGUYỄN VĂN MẪU|01/01/1996|A1|Sở GTVT Hà Nội"
+    gplx_b = "790987654321|TRẦN VĂN KHÁC|05/05/1992|B2|Sở GTVT TP.HCM"
+    dual_gplx = _make_dual_qr_canvas(gplx_a, gplx_b)
+    res_gplx = DocumentExtractor(settings, prep_stub, ocr_stub, cls_front).extract(
+        _encode_png(dual_gplx), "gplx_back"
+    )
+    assert res_gplx.qr is not None
+    assert res_gplx.qr.status == "CONFLICT"
+    assert res_gplx.qr.bound_to_capture is False
+    assert "MULTIPLE_DISTINCT_QR_IDENTITIES" in res_gplx.warnings
+    assert not any(c.source == "QR" for c in res_gplx.candidates)
+
+    # 3. Valid GPLX QR + unsupported URL QR -> no conflict, DECODED_VALID
+    mixed_gplx = _make_dual_qr_canvas("https://gplx.gov.vn/default.aspx?s=xyz", gplx_a)
+    decoded_mixed = decode_qr_image(mixed_gplx, "gplx_back", warped=False, try_fallback=True)
+    assert decoded_mixed.parsed.status == "DECODED_VALID"
+    assert decoded_mixed.parsed.fields["id_number"] == "790123456789"
+
+    # 4. Two identical valid CCCD QRs -> no conflict, DECODED_VALID
+    same_cccd = _make_dual_qr_canvas(cccd_a, cccd_a)
+    decoded_same = decode_qr_image(same_cccd, "cccd_front", warped=False, try_fallback=True)
+    assert decoded_same.parsed.status == "DECODED_VALID"
+    assert decoded_same.parsed.fields["id_number"] == "001095001111"
+
+    # 5. Unified QrDecodeBudget is shared across extract() passes and stops YOLO warp if exhausted
+    seen_budgets: list[tuple[int, int]] = []
+    yolo_warp_calls = 0
+
+    def spy_decode(image, slot, **kwargs):
+        b = kwargs.get("budget")
+        assert b is not None
+        seen_budgets.append((id(b), b.attempts))
+        b.attempts = b.max_attempts  # exhaust on first pass
+        return qr_mod.QrDecodeResult(
+            parsed=qr_mod.QrParsedResult(status="NOT_FOUND", legacy_status="QR_NOT_FOUND"),
+            document_side="BACK",
+        )
+
+    def spy_warp(_loaded):
+        nonlocal yolo_warp_calls
+        yolo_warp_calls += 1
+        return PreparedCard(np.full((400, 600, 3), 210, dtype=np.uint8))
+
+    monkeypatch.setattr(de_mod, "decode_qr_image", spy_decode)
+    extractor = DocumentExtractor(settings, prep_stub, ocr_stub, cls_front)
+    monkeypatch.setattr(extractor, "_try_prepare_for_gplx_qr", spy_warp)
+    blank_png = _encode_png(np.full((400, 600, 3), 220, dtype=np.uint8))
+    extractor.extract(blank_png, "gplx_back")
+    assert len(seen_budgets) == 1
+    assert yolo_warp_calls == 0
+
+    # Also verify shared budget object identity when pass 1 consumes partial attempts
+    seen_partial: list[tuple[int, int]] = []
+
+    def partial_decode(image, slot, **kwargs):
+        b = kwargs.get("budget")
+        assert b is not None
+        seen_partial.append((id(b), b.attempts))
+        b.attempts += 5
+        return qr_mod.QrDecodeResult(
+            parsed=qr_mod.QrParsedResult(status="NOT_FOUND", legacy_status="QR_NOT_FOUND"),
+            document_side="BACK",
+        )
+
+    monkeypatch.setattr(de_mod, "decode_qr_image", partial_decode)
+    extractor.extract(blank_png, "gplx_back")
+    assert len(seen_partial) == 3
+    assert len({item[0] for item in seen_partial}) == 1
+    assert [item[1] for item in seen_partial] == [0, 5, 10]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+import time
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ CrossValidationStatus = Literal[
 ]
 
 MAX_QR_PAYLOAD_LENGTH = 1024
+MAX_QR_DECODE_ATTEMPTS = 48
+MAX_QR_TIME_BUDGET_S = 2.0
 ID12_RE = re.compile(r"^[0-9]{12}$")
 OLD_ID_RE = re.compile(r"^(?:[0-9]{8,12})?$")
 GPLX_ID_RE = re.compile(r"^(?=.*\d)[A-Z0-9]{6,20}$")
@@ -62,6 +65,13 @@ RAW_QUADRANT_ROIS: tuple[tuple[float, float, float, float], ...] = (
     (0.00, 0.00, 0.55, 0.55),
     (0.45, 0.45, 1.00, 1.00),
 )
+_QUADRANT_TOP_RIGHT = (0.45, 0.00, 1.00, 0.55)
+_QUADRANT_BOTTOM_LEFT = (0.00, 0.45, 0.55, 1.00)
+_QUADRANT_TOP_LEFT = (0.00, 0.00, 0.55, 0.55)
+_QUADRANT_BOTTOM_RIGHT = (0.45, 0.45, 1.00, 1.00)
+_GAMMA_DARK_LUT = np.array(
+    [min(255, int(((i / 255.0) ** 1.8) * 255)) for i in range(256)], dtype=np.uint8
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,7 @@ class QrParsedResult:
     fields: dict[str, Any] = field(default_factory=dict)
     legacy_values: dict[str, str] = field(default_factory=dict)
     missing_fields: tuple[str, ...] = ()
+    conflict_fields: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
 
@@ -79,6 +90,28 @@ class QrDecodeResult:
     parsed: QrParsedResult
     card_variant: CardVariant = "UNKNOWN"
     document_side: DocumentSide = "UNKNOWN"
+
+
+@dataclass
+class QrDecodeBudget:
+    """Shared attempt + wall-clock budget across all QR decode passes for one capture."""
+
+    max_attempts: int = MAX_QR_DECODE_ATTEMPTS
+    time_budget_s: float = MAX_QR_TIME_BUDGET_S
+    started: float = field(default_factory=time.monotonic)
+    attempts: int = 0
+
+    def remaining_s(self) -> float:
+        return max(0.0, self.time_budget_s - (time.monotonic() - self.started))
+
+    def exhausted(self) -> bool:
+        return self.attempts >= self.max_attempts or self.remaining_s() <= 0.0
+
+    def consume_attempt(self) -> bool:
+        if self.exhausted():
+            return False
+        self.attempts += 1
+        return True
 
 
 def slot_to_side(slot: str | None) -> DocumentSide:
@@ -455,12 +488,14 @@ def _pad_quiet_zone(image: np.ndarray, pad: int = 24) -> np.ndarray:
     return cv2.copyMakeBorder(image, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=value)
 
 
-def _upscale_min_side(image: np.ndarray, target_min_side: int = 380) -> np.ndarray:
+def _upscale_min_side(
+    image: np.ndarray, target_min_side: int = 380, max_scale: float = 3.0
+) -> np.ndarray:
     height, width = image.shape[:2]
     min_side = min(height, width)
     if min_side <= 0 or min_side >= target_min_side:
         return image
-    scale = min(3.0, target_min_side / min_side)
+    scale = min(max_scale, target_min_side / min_side)
     return cv2.resize(
         image,
         (max(1, round(width * scale)), max(1, round(height * scale))),
@@ -505,12 +540,39 @@ def _crop_from_points(image: np.ndarray, points: np.ndarray) -> np.ndarray | Non
 
 def _preprocessing_variants(image: np.ndarray) -> Iterable[np.ndarray]:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    k = max(31, ((min(gray.shape[:2]) // 6) | 1))
+    bg = cv2.GaussianBlur(gray, (k, k), 0)
+    flat = cv2.divide(gray, np.maximum(bg, 1), scale=255)
+    yield flat
+
+    _, otsu_flat = cv2.threshold(flat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    yield otsu_flat
+
+    block = max(15, min(51, (min(gray.shape[:2]) // 10) | 1))
+    yield cv2.adaptiveThreshold(
+        flat,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        block,
+        7,
+    )
+
+    if image.ndim == 3:
+        min_rgb = np.min(image, axis=2)
+        bg_min = cv2.GaussianBlur(min_rgb, (k, k), 0)
+        flat_min = cv2.divide(min_rgb, np.maximum(bg_min, 1), scale=255)
+        _, otsu_min = cv2.threshold(flat_min, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        yield otsu_min
+
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
     yield clahe
+
     blur = cv2.GaussianBlur(clahe, (0, 0), 1.2)
     sharp = cv2.addWeighted(clahe, 1.6, blur, -0.6, 0)
     yield sharp
-    block = max(15, min(51, (min(gray.shape[:2]) // 10) | 1))
+
+    yield cv2.LUT(flat, _GAMMA_DARK_LUT)
     yield cv2.adaptiveThreshold(
         clahe,
         255,
@@ -521,6 +583,46 @@ def _preprocessing_variants(image: np.ndarray) -> Iterable[np.ndarray]:
     )
 
 
+def _merge_valid_qr_candidates(valid_results: list[QrParsedResult]) -> QrParsedResult:
+    """Detect conflicting identities across QR regions localized and decoded in one frame.
+
+    Coverage is bounded by the regions OpenCV detects within the active frame/view and
+    `QrDecodeBudget`, rather than claiming exhaustive detection of arbitrary layouts.
+    """
+    if len(valid_results) == 1:
+        return valid_results[0]
+    conflict_keys: list[str] = []
+    for idx, left in enumerate(valid_results):
+        for right in valid_results[idx + 1 :]:
+            summary = compare_qr_and_ocr_fields(left.fields, right.fields)
+            conflict_keys.extend(summary.conflict_fields)
+    if conflict_keys:
+        return QrParsedResult(
+            status="CONFLICT",
+            legacy_status="QR_DECODE_FAILED",
+            fields={},
+            legacy_values={},
+            conflict_fields=tuple(dict.fromkeys(conflict_keys)),
+            warnings=("MULTIPLE_DISTINCT_QR_IDENTITIES",),
+        )
+    return max(valid_results, key=lambda item: len(item.fields))
+
+
+def _record_qr_candidate(
+    parsed: QrParsedResult,
+    valid_results: list[QrParsedResult],
+    fallback: QrParsedResult | None,
+) -> QrParsedResult | None:
+    if parsed.status == "DECODED_VALID":
+        valid_results.append(parsed)
+        return fallback
+    if fallback is None or (
+        fallback.status == "UNSUPPORTED_FORMAT" and parsed.status == "INVALID_FORMAT"
+    ):
+        return parsed
+    return fallback
+
+
 def _decode_frame(
     detector: cv2.QRCodeDetector,
     frame: np.ndarray,
@@ -529,51 +631,80 @@ def _decode_frame(
     *,
     try_curved: bool = True,
 ) -> tuple[QrParsedResult | None, bool, np.ndarray | None]:
-    """Attempt single + multi + curved OpenCV decode on one frame."""
+    """Attempt multi + single + curved OpenCV decode on one frame without hiding conflicts."""
     saw_points = False
     first_points: np.ndarray | None = None
     fallback: QrParsedResult | None = None
+    valid_results: list[QrParsedResult] = []
 
-    payload, points, _ = detector.detectAndDecode(frame)
-    if points is not None:
-        saw_points = True
-        first_points = points
-    if payload:
-        parsed = parse_qr_payload(payload, slot, today=today)
-        if parsed.status == "DECODED_VALID":
-            return parsed, True, first_points
-        fallback = parsed
+    ok, decoded_list, multi_points = False, (), None
+    detect_multi = getattr(detector, "detectAndDecodeMulti", None)
+    if callable(detect_multi):
+        try:
+            ok, decoded_list, multi_points, _ = detect_multi(frame)
+        except cv2.error:
+            if not hasattr(detector, "detectAndDecode"):
+                raise
+            ok, decoded_list, multi_points = False, (), None
 
-    try:
-        ok, decoded_list, multi_points, _ = detector.detectAndDecodeMulti(frame)
-    except cv2.error:
-        ok, decoded_list, multi_points = False, (), None
     if multi_points is not None:
         saw_points = True
-        if first_points is None:
-            first_points = multi_points[0] if len(multi_points) > 0 else None
-    if ok and decoded_list:
-        for item in decoded_list:
-            if not item:
-                continue
-            parsed = parse_qr_payload(item, slot, today=today)
-            if parsed.status == "DECODED_VALID":
-                return parsed, True, first_points
-            if fallback is None or (
-                fallback.status == "UNSUPPORTED_FORMAT" and parsed.status == "INVALID_FORMAT"
-            ):
-                fallback = parsed
+        if len(multi_points) > 0:
+            first_points = multi_points[0]
 
-    if try_curved and saw_points:
+    decoded_seq = list(decoded_list) if ok and decoded_list else []
+    for item in decoded_seq:
+        if not item:
+            continue
+        parsed = parse_qr_payload(item, slot, today=today)
+        fallback = _record_qr_candidate(parsed, valid_results, fallback)
+
+    # When OpenCV locates >= 2 QR boxes but fails to decode one (e.g. second small QR),
+    # zoom-crop undecoded boxes so a second distinct identity cannot be overlooked.
+    if multi_points is not None and len(multi_points) >= 2:
+        has_undecoded_box = len(decoded_seq) < len(multi_points) or any(
+            idx >= len(decoded_seq) or not decoded_seq[idx] for idx in range(len(multi_points))
+        )
+        if has_undecoded_box:
+            for idx in range(min(len(multi_points), 4)):
+                if idx < len(decoded_seq) and decoded_seq[idx]:
+                    continue
+                crop = _crop_from_points(frame, multi_points[idx])
+                if crop is None:
+                    continue
+                zoomed = _pad_quiet_zone(_upscale_min_side(crop, 380), 24)
+                try:
+                    box_payload, _, _ = detector.detectAndDecode(zoomed)
+                except cv2.error:
+                    box_payload = ""
+                if box_payload:
+                    parsed = parse_qr_payload(box_payload, slot, today=today)
+                    fallback = _record_qr_candidate(parsed, valid_results, fallback)
+
+    multi_count = len(multi_points) if multi_points is not None else 0
+    if (not valid_results and fallback is None) or (
+        multi_count > 1 and multi_count > len(valid_results)
+    ):
+        payload, points, _ = detector.detectAndDecode(frame)
+        if points is not None:
+            saw_points = True
+            if first_points is None:
+                first_points = points
+        if payload:
+            parsed = parse_qr_payload(payload, slot, today=today)
+            fallback = _record_qr_candidate(parsed, valid_results, fallback)
+
+    if not valid_results and fallback is None and try_curved and saw_points:
         try:
             curved_payload, _, _ = detector.detectAndDecodeCurved(frame)
         except cv2.error:
             curved_payload = ""
         if curved_payload:
             parsed = parse_qr_payload(curved_payload, slot, today=today)
-            if parsed.status == "DECODED_VALID":
-                return parsed, True, first_points
-            fallback = fallback or parsed
+            fallback = _record_qr_candidate(parsed, valid_results, fallback)
+
+    if valid_results:
+        return _merge_valid_qr_candidates(valid_results), True, first_points
 
     return fallback, saw_points, first_points
 
@@ -586,6 +717,37 @@ def _views_for_orientation(image: np.ndarray) -> Iterable[np.ndarray]:
     else:
         yield image
         yield cv2.rotate(image, cv2.ROTATE_180)
+
+
+def _fallback_views_for_orientation(image: np.ndarray) -> Iterable[np.ndarray]:
+    if image.shape[0] > image.shape[1]:
+        yield cv2.rotate(image, cv2.ROTATE_180)
+    else:
+        yield cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        yield cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+
+def _quadrants_for_slot(slot: str) -> tuple[tuple[float, float, float, float], ...]:
+    if slot.startswith("gplx"):
+        return (
+            _QUADRANT_TOP_LEFT,
+            _QUADRANT_BOTTOM_LEFT,
+            _QUADRANT_BOTTOM_RIGHT,
+            _QUADRANT_TOP_RIGHT,
+        )
+    if slot == "cccd_front":
+        return (
+            _QUADRANT_TOP_RIGHT,
+            _QUADRANT_BOTTOM_LEFT,
+            _QUADRANT_TOP_LEFT,
+            _QUADRANT_BOTTOM_RIGHT,
+        )
+    return (
+        _QUADRANT_TOP_RIGHT,
+        _QUADRANT_BOTTOM_RIGHT,
+        _QUADRANT_TOP_LEFT,
+        _QUADRANT_BOTTOM_LEFT,
+    )
 
 
 def _resize_max(image: np.ndarray, max_side: int) -> np.ndarray:
@@ -618,6 +780,9 @@ def decode_qr_image(
     try_fallback: bool = False,
     check: Callable[[], None] = lambda: None,
     today: date | None = None,
+    max_attempts: int = MAX_QR_DECODE_ATTEMPTS,
+    time_budget_s: float = MAX_QR_TIME_BUDGET_S,
+    budget: QrDecodeBudget | None = None,
 ) -> QrDecodeResult:
     """Decode CCCD/Can Cuoc/GPLX QR via OpenCV across raw image, warped card, ROIs, and variants."""
     if not slot.startswith(("cccd", "gplx")):
@@ -638,18 +803,37 @@ def decode_qr_image(
     saw_engine_error = False
     fallback: QrParsedResult | None = None
     doc_side = slot_to_side(slot)
+    active_budget = (
+        budget
+        if budget is not None
+        else QrDecodeBudget(max_attempts=max_attempts, time_budget_s=time_budget_s)
+    )
 
-    def attempt(frame: np.ndarray, roi_kind: str | None = None) -> QrDecodeResult | None:
+    def attempt(
+        frame: np.ndarray,
+        roi_kind: str | None = None,
+        *,
+        try_curved: bool = True,
+        allow_point_zoom: bool = True,
+    ) -> QrDecodeResult | None:
         nonlocal saw_points, saw_engine_error, fallback
         check()
+        if not active_budget.consume_attempt():
+            return None
         try:
-            parsed, pts_seen, pts = _decode_frame(detector, frame, slot, today)
+            parsed, pts_seen, pts = _decode_frame(
+                detector,
+                frame,
+                slot,
+                today,
+                try_curved=try_curved and active_budget.remaining_s() >= 0.35,
+            )
         except cv2.error:
             saw_engine_error = True
             return None
         saw_points |= pts_seen
         if parsed is not None:
-            if parsed.status == "DECODED_VALID":
+            if parsed.status in {"DECODED_VALID", "CONFLICT"}:
                 return QrDecodeResult(
                     parsed=parsed,
                     card_variant=_infer_card_variant(slot, roi_kind),
@@ -657,12 +841,14 @@ def decode_qr_image(
                 )
             fallback = fallback or parsed
 
-        if pts is not None:
+        if pts is not None and parsed is None and allow_point_zoom:
             cropped = _crop_from_points(frame, pts)
             if cropped is not None:
                 zoomed = _pad_quiet_zone(_upscale_min_side(cropped, 380), 24)
                 for variant in (zoomed, *_preprocessing_variants(zoomed)):
                     check()
+                    if not active_budget.consume_attempt():
+                        break
                     try:
                         v_parsed, v_pts, _ = _decode_frame(
                             detector, variant, slot, today, try_curved=False
@@ -671,7 +857,7 @@ def decode_qr_image(
                         continue
                     saw_points |= v_pts
                     if v_parsed is not None:
-                        if v_parsed.status == "DECODED_VALID":
+                        if v_parsed.status in {"DECODED_VALID", "CONFLICT"}:
                             return QrDecodeResult(
                                 parsed=v_parsed,
                                 card_variant=_infer_card_variant(slot, roi_kind),
@@ -705,16 +891,25 @@ def decode_qr_image(
                 crop = _crop_normalized(image, roi)
                 if crop is None:
                     continue
-                prepared_roi = _pad_quiet_zone(_upscale_min_side(crop, 420), 24)
+                prepared_roi = _pad_quiet_zone(_upscale_min_side(crop, 600, max_scale=2.0), 24)
                 top_crops.append((kind, prepared_roi))
                 if hit := attempt(prepared_roi, roi_kind=kind):
                     return hit
 
-        # 3. Bounded preprocessing variants on priority ROIs
-        for kind, prepared_roi in top_crops[:2]:
-            for variant in _preprocessing_variants(prepared_roi):
-                if hit := attempt(variant, roi_kind=kind):
+        # 3. Breadth-first preprocessing variants on priority ROIs (glare filters first)
+        roi_iters = [(kind, iter(_preprocessing_variants(roi))) for kind, roi in top_crops[:2]]
+        while roi_iters and not active_budget.exhausted():
+            next_iters: list[tuple[str, Any]] = []
+            for kind, gen in roi_iters:
+                if active_budget.exhausted():
+                    break
+                variant = next(gen, None)
+                if variant is None:
+                    continue
+                next_iters.append((kind, gen))
+                if hit := attempt(variant, roi_kind=kind, try_curved=False, allow_point_zoom=False):
                     return hit
+            roi_iters = next_iters
     else:
         base = _resize_max(image, 2500)
         for view in _views_for_orientation(base):
@@ -722,7 +917,7 @@ def decode_qr_image(
                 return hit
 
         if try_fallback:
-            # Multi-scale raw attempts without depending on YOLO/warp
+            # Multi-scale and extra 0/90/180/270 orientation passes without depending on YOLO/warp
             h, w = image.shape[:2]
             if max(h, w) >= 2200:
                 if hit := attempt(_resize_max(image, 1400)):
@@ -734,22 +929,39 @@ def decode_qr_image(
                 if hit := attempt(_pad_quiet_zone(upscaled, 24)):
                     return hit
 
-            # Bounded quadrant ROIs + preprocessing variants
-            for roi in RAW_QUADRANT_ROIS:
+            for view in _fallback_views_for_orientation(base):
+                if active_budget.exhausted():
+                    break
+                if hit := attempt(view):
+                    return hit
+
+            # Bounded ALL 4 quadrant ROIs + upscaled crops + glare-removal variants
+            quad_crops: list[np.ndarray] = []
+            for roi in _quadrants_for_slot(slot):
+                if active_budget.exhausted():
+                    break
                 crop = _crop_normalized(base, roi)
                 if crop is None:
                     continue
-                prepared_roi = _pad_quiet_zone(_upscale_min_side(crop, 420), 24)
+                prepared_roi = _pad_quiet_zone(_upscale_min_side(crop, 600, max_scale=2.0), 24)
+                quad_crops.append(prepared_roi)
                 if hit := attempt(prepared_roi):
                     return hit
-            for roi in RAW_QUADRANT_ROIS[:2]:
-                crop = _crop_normalized(base, roi)
-                if crop is None:
-                    continue
-                prepared_roi = _pad_quiet_zone(_upscale_min_side(crop, 420), 24)
-                for variant in _preprocessing_variants(prepared_roi):
-                    if hit := attempt(variant):
+
+            # Apply each glare filter breadth-first across ALL 4 quadrants before advancing filters
+            quad_iters = [iter(_preprocessing_variants(roi)) for roi in quad_crops]
+            while quad_iters and not active_budget.exhausted():
+                next_quads: list[Any] = []
+                for gen in quad_iters:
+                    if active_budget.exhausted():
+                        break
+                    variant = next(gen, None)
+                    if variant is None:
+                        continue
+                    next_quads.append(gen)
+                    if hit := attempt(variant, try_curved=False, allow_point_zoom=False):
                         return hit
+                quad_iters = next_quads
 
     if fallback is not None:
         return QrDecodeResult(parsed=fallback, document_side=doc_side)

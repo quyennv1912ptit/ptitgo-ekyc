@@ -12,6 +12,7 @@ TEXT = {
     "IMAGE_TOO_SMALL": "Ảnh có độ phân giải thấp.",
     "CARD_CROPPED": "Có thể ảnh đã cắt mất một phần thẻ.",
     "CARD_NOT_FOUND": "Chưa xác định được vùng thẻ.",
+    "DOCUMENT_SLOT_MISMATCH": "Ảnh có thể sai loại giấy tờ hoặc sai mặt.",
     "OCR_INCOMPLETE": "Lượt đọc chữ chưa lấy đủ thông tin.",
     "QR_OCR_CONFLICT": "Thông tin trích xuất từ các nguồn chưa khớp.",
     "QR_OCR_NAME_DIACRITIC_MISMATCH": (
@@ -163,6 +164,9 @@ def verification_warnings(
             continue
         result = proposal.get("result") or {}
         for code in result.get("warnings", []):
+            if code == "DOCUMENT_SLOT_MISMATCH":
+                add("DOCUMENT_SLOT_MISMATCH", "OCR", slot=slot, severity="CRITICAL")
+                continue
             code = {
                 "DETECTOR_NO_BOX": "CARD_NOT_FOUND",
                 "DETECTOR_CARD_NOT_FOUND": "CARD_NOT_FOUND",

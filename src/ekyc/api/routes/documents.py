@@ -1,6 +1,6 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from ekyc.core.errors import EkycError, ErrorCode
@@ -22,6 +22,7 @@ async def extract_document(
     request: Request,
     response: Response,
     worker: Annotated[CccdWorker, Depends(get_cccd_service)],
+    ocr_mode: Annotated[Literal["full", "classify_only"], Query()] = "full",
 ) -> ApiResponse[ExtractionResult]:
     limit = request.app.state.settings.max_image_bytes
     body = bytearray()
@@ -29,6 +30,9 @@ async def extract_document(
         if len(body) + len(chunk) > limit:
             raise EkycError(ErrorCode.IMAGE_TOO_LARGE)
         body.extend(chunk)
-    result = await run_in_threadpool(worker.extract, bytes(body), slot)
+    if ocr_mode == "full":
+        result = await run_in_threadpool(worker.extract, bytes(body), slot)
+    else:
+        result = await run_in_threadpool(worker.extract, bytes(body), slot, ocr_mode=ocr_mode)
     response.headers["Cache-Control"] = "no-store"
     return ApiResponse.ok(result, request.state.request_id)

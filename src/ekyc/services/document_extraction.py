@@ -4,6 +4,8 @@ import os
 import unicodedata
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import cv2
@@ -22,6 +24,7 @@ from ekyc.pipeline.parsers.cccd_parser import parse_cccd_back, parse_cccd_front
 from ekyc.pipeline.parsers.gplx_assisted import parse_assisted_gplx
 from ekyc.pipeline.parsers.gplx_parser import parse_gplx_front
 from ekyc.pipeline.qr import (
+    QrDecodeBudget,
     QrDecodeResult,
     QrParsedResult,
     compare_qr_and_ocr_fields,
@@ -252,9 +255,13 @@ def _build_qr_result(
             if "QR_OCR_INSUFFICIENT_EVIDENCE" not in warnings:
                 warnings.append("QR_OCR_INSUFFICIENT_EVIDENCE")
     else:
-        conflict_fields = qr_conflicts
-        cross_status = "NOT_APPLICABLE"
+        detail_conflicts = qr_detail.parsed.conflict_fields if qr_detail is not None else ()
+        conflict_fields = list(dict.fromkeys([*qr_conflicts, *detail_conflicts]))
+        cross_status = "CONFLICT" if status == "CONFLICT" else "NOT_APPLICABLE"
 
+    bound_to_capture = status == "DECODED_VALID" or (
+        status == "CONFLICT" and "MULTIPLE_DISTINCT_QR_IDENTITIES" not in warnings
+    )
     return QrResult(
         status=status,
         source="QR_IMAGE",
@@ -265,7 +272,7 @@ def _build_qr_result(
         conflict_fields=conflict_fields,
         warnings=warnings,
         cross_validation_status=cross_status,
-        bound_to_capture=status in {"DECODED_VALID", "CONFLICT"},
+        bound_to_capture=bound_to_capture,
     )
 
 
@@ -407,9 +414,36 @@ class DocumentExtractor:
             candidates.append(candidate)
         return candidates
 
-    def _ocr(self, image, slot, result, check):
+    def _ocr(self, image, slot, result, check, *, classify_only: bool = False):
         expected_type, expected_side = slot.upper().split("_")
         today = datetime.now(ZoneInfo(self.settings.timezone)).date()
+        if slot == "cccd_back" and classify_only:
+            max_side = min(self.settings.ocr_max_side_px, 960)
+            saw_non_mismatch = False
+            saw_text = False
+            for frame in reading_views(resize_for_ocr(image, max_side)):
+                raw, _lines, cls = self.recognize(frame, check)
+                mismatch = cls.doc_type not in (expected_type, DocType.UNKNOWN) or cls.side not in (
+                    expected_side,
+                    Side.UNKNOWN,
+                )
+                if mismatch:
+                    continue
+                saw_non_mismatch = True
+                saw_text |= bool(raw)
+                if cls.doc_type == expected_type and cls.side == expected_side:
+                    result.ocr_status = "SKIPPED"
+                    return
+            if not saw_non_mismatch:
+                result.ocr_status = "OCR_NO_FIELDS"
+                result.warnings.append("DOCUMENT_SLOT_MISMATCH")
+            elif not saw_text:
+                result.ocr_status = "OCR_NO_TEXT"
+            else:
+                result.ocr_status = "SKIPPED"
+                result.warnings.append("ORIENTATION_UNCERTAIN")
+            return
+
         ranked = []
         for frame in reading_views(resize_for_ocr(image, self.settings.ocr_max_side_px)):
             raw, lines, cls = self.recognize(frame, check)
@@ -429,6 +463,13 @@ class DocumentExtractor:
                 bool(raw),
             )
             ranked.append((rank, candidates, raw, lines, parsed))
+            if (
+                slot == "cccd_back"
+                and cls.doc_type == expected_type
+                and cls.side == expected_side
+                and eligible == len(FIELD_MAP[slot])
+            ):
+                break
         if not ranked:
             result.ocr_status = "OCR_NO_FIELDS"
             result.warnings.append("DOCUMENT_SLOT_MISMATCH")
@@ -446,6 +487,72 @@ class DocumentExtractor:
                 [*raw, *lines], parsed, self.settings
             )
 
+    def _apply_qr_fallback(
+        self,
+        slot: DocumentSlot,
+        result: ExtractionResult,
+        qr_detail: QrDecodeResult | None,
+        fallback_qr: QrDecodeResult,
+        *,
+        on_partial: Callable[[ExtractionResult], None] | None = None,
+        emit_partial: bool = False,
+    ) -> QrDecodeResult | None:
+        if fallback_qr.parsed.status == "CONFLICT":
+            result.qr_status = fallback_qr.parsed.legacy_status
+            return fallback_qr
+        if fallback_qr.parsed.status == "DECODED_VALID":
+            result.qr_status = fallback_qr.parsed.legacy_status
+            result.candidates.extend(
+                make_candidate(
+                    slot,
+                    LEGACY_KEYS[key],
+                    _qr_candidate_value(key, value),
+                    "QR",
+                )
+                for key, value in fallback_qr.parsed.legacy_values.items()
+            )
+            if emit_partial and on_partial is not None and result.candidates:
+                partial_result = result.model_copy(deep=True)
+                partial_result.ocr_status = "OCR_FAILED"
+                partial_result.warnings.append("OCR_UNAVAILABLE")
+                partial_result.qr = _build_qr_result(
+                    slot,
+                    partial_result.qr_status,
+                    fallback_qr,
+                    partial_result.candidates,
+                )
+                on_partial(partial_result)
+            return fallback_qr
+        if (
+            qr_detail is not None
+            and qr_detail.parsed.status == "NOT_FOUND"
+            and fallback_qr.parsed.status != "NOT_FOUND"
+        ):
+            result.qr_status = fallback_qr.parsed.legacy_status
+            return fallback_qr
+        return qr_detail
+
+    def _try_prepare_for_gplx_qr(self, loaded) -> PreparedCard | None:
+        if self.preparer is None:
+            if self.settings.card_detector_backend == "opencv":
+                return None
+            model_path = self.settings.card_yolo_model_path
+            if not model_path or not Path(model_path).is_file():
+                return None
+        try:
+            preparer = self._preparer()
+            return (
+                preparer.prepare_loaded(loaded, diagnostics=True)
+                if isinstance(preparer, DefaultCardPreparer)
+                else preparer.prepare_loaded(loaded)
+            )
+        except EkycError as exc:
+            if exc.code == ErrorCode.ENGINE_TIMEOUT:
+                raise
+            return None
+        except (OSError, RuntimeError, cv2.error):
+            return None
+
     def extract(
         self,
         data: bytes,
@@ -453,6 +560,7 @@ class DocumentExtractor:
         *,
         qr: bool = True,
         ocr: bool = True,
+        ocr_mode: Literal["full", "classify_only"] = "full",
         check: Callable[[], None] = lambda: None,
         on_partial: Callable[[ExtractionResult], None] | None = None,
     ) -> ExtractionResult:
@@ -463,6 +571,7 @@ class DocumentExtractor:
         result = ExtractionResult(slot=slot)
         today = datetime.now(ZoneInfo(self.settings.timezone)).date()
         qr_detail: QrDecodeResult | None = None
+        qr_budget = QrDecodeBudget()
         if qr:
             with stage("qr_ms"):
                 try:
@@ -471,9 +580,10 @@ class DocumentExtractor:
                             loaded.bgr,
                             slot,
                             warped=False,
-                            try_fallback=not (ocr and slot in FIELD_MAP),
+                            try_fallback=False,
                             check=check,
                             today=today,
+                            budget=qr_budget,
                         )
                         result.qr_status = qr_detail.parsed.legacy_status
                         values = qr_detail.parsed.legacy_values
@@ -512,6 +622,62 @@ class DocumentExtractor:
                 )
                 on_partial(partial_result)
         if ocr and slot not in FIELD_MAP:
+            if (
+                qr
+                and decode_qr is _DEFAULT_DECODE_QR
+                and not qr_budget.exhausted()
+                and (
+                    qr_detail is None
+                    or qr_detail.parsed.status
+                    in {"NOT_FOUND", "DETECTED_UNREADABLE", "UNSUPPORTED_FORMAT"}
+                )
+            ):
+                if (prepared := self._try_prepare_for_gplx_qr(loaded)) is not None:
+                    with stage("qr_ms"):
+                        try:
+                            qr_warped = decode_qr_image(
+                                prepared.image,
+                                slot,
+                                warped=True,
+                                check=check,
+                                today=today,
+                                budget=qr_budget,
+                            )
+                            qr_detail = self._apply_qr_fallback(
+                                slot, result, qr_detail, qr_warped
+                            )
+                        except EkycError as exc:
+                            if exc.code == ErrorCode.ENGINE_TIMEOUT:
+                                raise
+                        except cv2.error:
+                            pass
+                if (
+                    not qr_budget.exhausted()
+                    and (
+                        qr_detail is None
+                        or qr_detail.parsed.status
+                        in {"NOT_FOUND", "DETECTED_UNREADABLE", "UNSUPPORTED_FORMAT"}
+                    )
+                ):
+                    with stage("qr_ms"):
+                        try:
+                            qr_raw_fallback = decode_qr_image(
+                                loaded.bgr,
+                                slot,
+                                warped=False,
+                                try_fallback=True,
+                                check=check,
+                                today=today,
+                                budget=qr_budget,
+                            )
+                            qr_detail = self._apply_qr_fallback(
+                                slot, result, qr_detail, qr_raw_fallback
+                            )
+                        except EkycError as exc:
+                            if exc.code == ErrorCode.ENGINE_TIMEOUT:
+                                raise
+                        except cv2.error:
+                            pass
             result.ocr_status = "OCR_UNSUPPORTED"
             result.field_statuses["gplx_expiry"] = "UNSUPPORTED"
         elif ocr:
@@ -541,6 +707,7 @@ class DocumentExtractor:
             if (
                 qr
                 and decode_qr is _DEFAULT_DECODE_QR
+                and not qr_budget.exhausted()
                 and slot.startswith(("cccd", "gplx"))
                 and (
                     qr_detail is None
@@ -557,44 +724,31 @@ class DocumentExtractor:
                             try_fallback=not warped_ok,
                             check=check,
                             today=today,
+                            budget=qr_budget,
                         )
-                        if qr_phase2.parsed.status == "DECODED_VALID":
-                            qr_detail = qr_phase2
-                            result.qr_status = qr_phase2.parsed.legacy_status
-                            result.candidates.extend(
-                                make_candidate(
-                                    slot,
-                                    LEGACY_KEYS[key],
-                                    _qr_candidate_value(key, value),
-                                    "QR",
-                                )
-                                for key, value in qr_phase2.parsed.legacy_values.items()
-                            )
-                            if on_partial is not None and result.candidates:
-                                partial_result = result.model_copy(deep=True)
-                                partial_result.ocr_status = "OCR_FAILED"
-                                partial_result.warnings.append("OCR_UNAVAILABLE")
-                                partial_result.qr = _build_qr_result(
-                                    slot,
-                                    partial_result.qr_status,
-                                    qr_detail,
-                                    partial_result.candidates,
-                                )
-                                on_partial(partial_result)
-                        elif (
-                            qr_detail is not None
-                            and qr_detail.parsed.status == "NOT_FOUND"
-                            and qr_phase2.parsed.status != "NOT_FOUND"
-                        ):
-                            qr_detail = qr_phase2
-                            result.qr_status = qr_phase2.parsed.legacy_status
+                        qr_detail = self._apply_qr_fallback(
+                            slot,
+                            result,
+                            qr_detail,
+                            qr_phase2,
+                            on_partial=on_partial,
+                            emit_partial=True,
+                        )
                     except EkycError as exc:
                         if exc.code == ErrorCode.ENGINE_TIMEOUT:
                             raise
                     except cv2.error:
                         pass
+            use_classify_only = slot == "cccd_back" and (
+                ocr_mode == "classify_only"
+                or (
+                    qr_detail is not None
+                    and qr_detail.parsed.status == "DECODED_VALID"
+                    and bool(qr_detail.parsed.fields.get("issue_date"))
+                )
+            )
             try:
-                self._ocr(image, slot, result, check)
+                self._ocr(image, slot, result, check, classify_only=use_classify_only)
             except EkycError as exc:
                 if exc.code == ErrorCode.ENGINE_TIMEOUT:
                     raise
@@ -604,6 +758,13 @@ class DocumentExtractor:
                 result.ocr_status = "OCR_FAILED"
                 result.warnings.append("OCR_UNAVAILABLE")
         check()
+        if qr_detail is not None and qr_detail.parsed.status == "CONFLICT":
+            for warning in qr_detail.parsed.warnings:
+                if warning not in result.warnings:
+                    result.warnings.append(warning)
+            for key in qr_detail.parsed.conflict_fields:
+                if key not in result.conflict_fields:
+                    result.conflict_fields.append(key)
         for item in result.candidates:
             if item.conflict and item.field_key not in result.conflict_fields:
                 result.conflict_fields.append(item.field_key)

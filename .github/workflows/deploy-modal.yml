@@ -92,6 +92,7 @@ jobs:
           MODAL_MODEL_VOLUME_NAME: ${{ vars.MODAL_MODEL_VOLUME_NAME || 'ekyc-models' }}
           MODAL_SECRET_NAME: ${{ vars.MODAL_SECRET_NAME || 'ekyc-extraction-staging' }}
           MODAL_EXTRA_SECRETS: ${{ vars.MODAL_EXTRA_SECRETS || '' }}
+          MODAL_SCALEDOWN_WINDOW: ${{ vars.MODAL_SCALEDOWN_WINDOW || '300' }}
         run: |
           uv run --locked --no-default-groups --with modal==1.6.4 \
             python scripts/modal_pre_deploy_check.py --offline
@@ -108,6 +109,7 @@ jobs:
           MODAL_MODEL_VOLUME_NAME: ${{ vars.MODAL_MODEL_VOLUME_NAME || 'ekyc-models' }}
           MODAL_SECRET_NAME: ${{ vars.MODAL_SECRET_NAME || 'ekyc-extraction-staging' }}
           MODAL_EXTRA_SECRETS: ${{ vars.MODAL_EXTRA_SECRETS || '' }}
+          MODAL_SCALEDOWN_WINDOW: ${{ vars.MODAL_SCALEDOWN_WINDOW || '300' }}
           GIT_COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail

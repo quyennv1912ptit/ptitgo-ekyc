@@ -394,7 +394,7 @@ def test_modal_entrypoint_config_and_volume_mode(monkeypatch):
     assert fn_kwargs["memory"] == (3072, 6144)
     assert fn_kwargs["min_containers"] == 0
     assert fn_kwargs["max_containers"] == 1
-    assert fn_kwargs["scaledown_window"] == 120
+    assert fn_kwargs["scaledown_window"] == 300
     assert fn_kwargs["region"] == "ap"
     assert fn_kwargs["routing_region"] == "ap-south"
 
@@ -419,3 +419,10 @@ def test_modal_entrypoint_config_and_volume_mode(monkeypatch):
     monkeypatch.setenv("MODAL_APP_ENV", "dev")
     with pytest.raises(ValueError, match="Unsupported MODAL_APP_ENV"):
         modal_ekyc.resolve_app_env()
+
+    monkeypatch.setenv("MODAL_SCALEDOWN_WINDOW", "420")
+    assert modal_ekyc.resolve_scaledown_window() == 420
+    for invalid_window in ("15", "901", "abc"):
+        monkeypatch.setenv("MODAL_SCALEDOWN_WINDOW", invalid_window)
+        with pytest.raises(ValueError, match="Unsupported MODAL_SCALEDOWN_WINDOW"):
+            modal_ekyc.resolve_scaledown_window()

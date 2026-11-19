@@ -83,7 +83,11 @@ def handle_job(
         elif operation == "cccd":
             result = service.run(*args, deadline=deadline)
         else:
-            data, slot, source = args
+            if len(args) == 4:
+                data, slot, source, ocr_mode = args
+            else:
+                data, slot, source = args
+                ocr_mode = "full"
 
             def publish_partial(result: ExtractionResult) -> None:
                 conn.send(("partial", result, metrics, peak_ram_mib()))
@@ -93,6 +97,7 @@ def handle_job(
                 slot,
                 qr=source != "ocr",
                 ocr=source != "qr",
+                ocr_mode=ocr_mode,
                 check=partial(check_deadline, deadline),
                 on_partial=publish_partial,
             )
@@ -216,9 +221,11 @@ class CccdWorker:
         slot: DocumentSlot,
         source: Literal["both", "qr", "ocr"] = "both",
         *,
+        ocr_mode: Literal["full", "classify_only"] = "full",
         timeout: float | None = None,
     ) -> ExtractionResult:
-        return self._run("extract", (data, slot, source), timeout)
+        payload = (data, slot, source) if ocr_mode == "full" else (data, slot, source, ocr_mode)
+        return self._run("extract", payload, timeout)
 
     def check_face_quality(self, images: dict[str, bytes]) -> FaceResult:
         return self._run("face_quality", (images,))

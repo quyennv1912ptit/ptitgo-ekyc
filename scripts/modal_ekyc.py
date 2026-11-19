@@ -14,6 +14,20 @@ OCR_SOURCE = Path(os.environ.get("EKYC_OCR_DIR", Path.home() / ".EasyOCR" / "mod
 DEFAULT_APP_NAME = "ekyc-extraction-staging"
 DEFAULT_SECRET_NAME = "ekyc-extraction-staging"
 DEFAULT_VOLUME_NAME = "ekyc-models"
+DEFAULT_SCALEDOWN_WINDOW = 300
+
+
+def resolve_scaledown_window() -> int:
+    raw = os.environ.get("MODAL_SCALEDOWN_WINDOW", str(DEFAULT_SCALEDOWN_WINDOW)).strip()
+    if not raw:
+        return DEFAULT_SCALEDOWN_WINDOW
+    try:
+        seconds = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported MODAL_SCALEDOWN_WINDOW: {raw}") from exc
+    if not (60 <= seconds <= 900):
+        raise ValueError(f"Unsupported MODAL_SCALEDOWN_WINDOW: {raw}")
+    return seconds
 
 
 def local_models_available() -> bool:
@@ -130,7 +144,7 @@ app = modal.App(APP_NAME)
     memory=(3072, 6144),
     min_containers=0,
     max_containers=1,
-    scaledown_window=int(os.environ.get("MODAL_SCALEDOWN_WINDOW", "120")),
+    scaledown_window=resolve_scaledown_window(),
     region="ap",
     routing_region="ap-south",
     startup_timeout=120,
