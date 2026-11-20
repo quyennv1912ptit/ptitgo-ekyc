@@ -118,6 +118,8 @@ def test_modal_pre_deploy_volume_verification():
     result = pre_check.verify_volume_contents(valid_volume)
     assert result["face_manifest_verified"] is False
     assert len(result["verified_files"]) == 3
+    with pytest.raises(RuntimeError, match="Face comparison requires"):
+        pre_check.verify_volume_contents(valid_volume, require_face=True)
 
     missing_volume = _FakeVolume({"models": [], "ocr": []})
     with pytest.raises(RuntimeError, match="missing required non-empty weights"):
@@ -377,6 +379,7 @@ def test_modal_entrypoint_config_and_volume_mode(monkeypatch):
             return lambda fn: fn
 
     monkeypatch.setitem(sys.modules, "modal", _FakeModal)
+    monkeypatch.setenv("MODAL_FACE_COMPARISON_ENABLED", "true")
     monkeypatch.setenv("MODAL_MODEL_SOURCE", "volume")
     monkeypatch.setenv("MODAL_ENVIRONMENT", "production")
     monkeypatch.setenv("MODAL_APP_ENV", "prod")
@@ -389,6 +392,8 @@ def test_modal_entrypoint_config_and_volume_mode(monkeypatch):
     modal_ekyc = _load_script("modal_ekyc")
     assert modal_ekyc.app.name == "ekyc-extraction-staging"
     assert modal_ekyc.MODEL_SOURCE == "volume"
+    assert modal_ekyc.image.env_map["FACE_COMPARISON_ENABLED"] == "true"
+    assert modal_ekyc.image.env_map["FACE_COMPARISON_MANIFEST"] == "/opt/ekyc/face/manifest.json"
     fn_kwargs = modal_ekyc.app.fn_kwargs
     assert fn_kwargs["cpu"] == 4
     assert fn_kwargs["memory"] == (3072, 6144)

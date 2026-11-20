@@ -68,6 +68,8 @@ jobs:
     needs: quality-gates
     if: inputs.environment == 'staging'
     environment: ${{ inputs.environment }}
+    env:
+      MODAL_FACE_COMPARISON_ENABLED: ${{ vars.MODAL_FACE_COMPARISON_ENABLED || 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

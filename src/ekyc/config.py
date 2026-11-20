@@ -181,7 +181,6 @@ class Settings(BaseSettings):
         if self.deployed and (
             self.card_experimental_keypoint_recovery
             or self.card_experimental_geometry_review
-            or self.face_comparison_enabled
             or self.inference_ocr_factory
         ):
             raise ValueError("Experimental inference configuration is restricted to local use")

@@ -88,7 +88,7 @@ def _entry_map(entries) -> dict[str, int]:
     return result
 
 
-def verify_volume_contents(volume) -> dict[str, object]:
+def verify_volume_contents(volume, *, require_face: bool = False) -> dict[str, object]:
     files: dict[str, int] = {}
     for prefix in ("models", "ocr"):
         try:
@@ -124,6 +124,10 @@ def verify_volume_contents(volume) -> dict[str, object]:
                 raise RuntimeError(f"Missing face ONNX model in Modal Volume: face/{filename}")
         face_verified = True
 
+    if require_face and not face_verified:
+        raise RuntimeError(
+            "Face comparison requires face/manifest.json and YuNet/SFace models in the Modal Volume"
+        )
     return {
         "verified_files": list(REQUIRED_VOLUME_FILES),
         "face_manifest_verified": face_verified,
@@ -156,7 +160,13 @@ def main(argv: list[str] | None = None) -> int:
         volume = modal.Volume.from_name(
             volume_name, environment_name=env_name, create_if_missing=False
         )
-        summary["volume"] = {"name": volume_name, **verify_volume_contents(volume)}
+        require_face = (
+            os.environ.get("MODAL_FACE_COMPARISON_ENABLED", "false").strip().lower() == "true"
+        )
+        summary["volume"] = {
+            "name": volume_name,
+            **verify_volume_contents(volume, require_face=require_face),
+        }
 
     print(json.dumps(summary))
     return 0

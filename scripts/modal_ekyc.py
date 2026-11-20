@@ -69,6 +69,12 @@ def build_image_env() -> dict[str, str]:
         "INFERENCE_WARM_UP": "true",
         "CCCD_TIMEOUT_S": "34",
     }
+    face_enabled = os.environ.get("MODAL_FACE_COMPARISON_ENABLED", "false").strip().lower()
+    if face_enabled not in {"true", "false"}:
+        raise ValueError("MODAL_FACE_COMPARISON_ENABLED must be true or false")
+    env["FACE_COMPARISON_ENABLED"] = face_enabled
+    if face_enabled == "true":
+        env["FACE_COMPARISON_MANIFEST"] = f"{VOLUME_MOUNT}/face/manifest.json"
     deploy_tag = os.environ.get("MODAL_DEPLOY_TAG", "").strip()
     commit_sha = os.environ.get("GIT_COMMIT_SHA", "").strip()
     if deploy_tag:
@@ -132,6 +138,18 @@ if MODEL_SOURCE == "local":
         .add_local_file(OCR_SOURCE / "craft_mlt_25k.pth", f"{OCR_DIR}/craft_mlt_25k.pth", copy=True)
         .add_local_file(OCR_SOURCE / "latin_g2.pth", f"{OCR_DIR}/latin_g2.pth", copy=True)
     )
+
+if MODEL_SOURCE == "local" and build_image_env()["FACE_COMPARISON_ENABLED"] == "true":
+    for filename in (
+        "manifest.json",
+        "face_detection_yunet_2023mar.onnx",
+        "face_recognition_sface_2021dec.onnx",
+        "face_detection_yunet-LICENSE",
+        "face_recognition_sface-LICENSE",
+    ):
+        image = image.add_local_file(
+            ROOT / ".local-face" / filename, f"{VOLUME_MOUNT}/face/{filename}", copy=True
+        )
 
 app = modal.App(APP_NAME)
 

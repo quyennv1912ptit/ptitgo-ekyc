@@ -97,7 +97,7 @@ def test_image_quality_warnings_use_native_pixels_and_avoid_guessing_occlusion()
     assert inspect_face(np.full_like(image, 100), FACE, PROFILE) == "FACE_BLURRY"
 
 
-def test_runtime_is_off_by_default_and_in_production(settings, tmp_path):
+def test_runtime_requires_opt_in_and_manifest_in_all_environments(settings, tmp_path):
     manifest = tmp_path / "manifest.json"
     manifest.touch()
     assert not enabled(settings)
@@ -109,7 +109,11 @@ def test_runtime_is_off_by_default_and_in_production(settings, tmp_path):
         }
     )
     assert enabled(config)
-    assert not enabled(config.model_copy(update={"env": "prod"}))
+    assert enabled(config.model_copy(update={"env": "prod"}))
+    assert enabled(config.model_copy(update={"env": "staging"}))
+    assert not enabled(
+        config.model_copy(update={"face_comparison_manifest": tmp_path / "missing.json"})
+    )
 
 
 def test_model_loader_rejects_bad_hash_and_outside_directory(tmp_path):

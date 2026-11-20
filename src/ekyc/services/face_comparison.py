@@ -137,8 +137,7 @@ class OpenCvFaceEngine:
 
 def enabled(settings: Settings) -> bool:
     return bool(
-        not settings.deployed
-        and settings.face_comparison_enabled
+        settings.face_comparison_enabled
         and settings.face_comparison_manifest
         and settings.face_comparison_manifest.is_file()
         and settings.ocr_backend == "easyocr"

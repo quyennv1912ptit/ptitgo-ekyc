@@ -25,7 +25,6 @@ def staging_settings(**overrides):
     "overrides",
     [
         {"ekyc_api_key": "short"},
-        {"face_comparison_enabled": True},
         {"inference_ocr_factory": "tests.fake:factory"},
         {"card_experimental_keypoint_recovery": True},
     ],
@@ -97,3 +96,20 @@ def test_metrics_report_business_errors_and_bounded_latency():
     assert 'kind="request",quantile="0.99"} 1.000000' in result
     assert 'outcome="restart"} 1' in result
     assert "ekyc_inference_worker_peak_ram_mib 42" in result
+
+@pytest.mark.parametrize("environment", ["staging", "prod"])
+def test_deployed_face_comparison_accepts_explicit_opt_in(environment, tmp_path):
+    from ekyc.config import Settings
+    from ekyc.services.face_comparison import enabled
+
+    manifest = tmp_path / "manifest.json"
+    manifest.touch()
+    settings = Settings(
+        _env_file=None,
+        env=environment,
+        ekyc_api_key="synthetic-test-key-for-face-feature",
+        ocr_backend="easyocr",
+        face_comparison_enabled=True,
+        face_comparison_manifest=manifest,
+    )
+    assert enabled(settings)

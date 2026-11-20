@@ -26,3 +26,14 @@ Dùng ảnh checkerboard tổng hợp và mock engine để kiểm tra ba cặp,
 
 Muốn đánh giá để bật phân loại sau này cần artifact được phép sử dụng, dữ liệu đã có quyền xử lý, giao thức đo FAR/FRR theo nhóm ảnh và ngưỡng được khóa sau đánh giá. Giữ feature OFF khi chưa có bằng chứng. Không deploy và dừng trước Phase 11.7.
 
+
+## Bật đối chiếu theo yêu cầu vận hành
+
+Cấu hình triển khai hiện cho phép đối chiếu có sự đồng ý của tài xế ở staging và production.
+
+- Backend dùng `DATXE_EKYC_FACE_COMPARISON_ENABLED=true`. Môi trường local đã bật cờ này.
+- Workflow Modal dùng biến `MODAL_FACE_COMPARISON_ENABLED`, mặc định `true` khi deploy qua workflow. Đặt `false` để tắt.
+- Khi bật, Modal dùng `/opt/ekyc/face/manifest.json` và cần hai model YuNet/SFace cùng manifest tại thư mục `face/` trong model volume. Pre-deploy kiểm tra các file trước khi triển khai. Worker kiểm tra SHA-256 khi nạp model.
+- Nếu deploy với nguồn model local, entrypoint đóng gói manifest, model và giấy phép từ `.local-face/`.
+- Bản nộp phải chứa `faceConsent.version = face-comparison-v1`. Với bản nộp cũ thiếu đồng ý, tài xế cần xác nhận và nộp lại qua app. Admin mở bản nộp hiện tại và bấm **Chạy đối chiếu thử nghiệm**.
+- Kết quả vẫn là điểm cosine hỗ trợ admin đối chiếu ảnh. Ngưỡng kết luận và kiểm tra người thật vẫn ở trạng thái chưa đánh giá.
